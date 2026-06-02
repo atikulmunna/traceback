@@ -16,9 +16,7 @@ It aims to create deduplicated snapshots while making backup behavior easy to in
 
 ## Current Status
 
-TraceBack is in the initial implementation phase. The first local repository format is documented in:
-
-- [Repository Format v0](repository_format_v0.md)
+TraceBack is in the initial implementation phase.
 
 ## Development Approach
 
