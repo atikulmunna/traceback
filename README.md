@@ -16,11 +16,9 @@ It aims to create deduplicated snapshots while making backup behavior easy to in
 
 ## Current Status
 
-TraceBack is in the initial implementation phase. The requirements and first local repository format are documented in:
+TraceBack is in the initial implementation phase. The first local repository format is documented in:
 
-- [Software Requirements Specification](traceback_backup_tool_srs.md)
 - [Repository Format v0](repository_format_v0.md)
-- [Development Workflow](DEVELOPMENT.md)
 
 ## Development Approach
 
@@ -29,4 +27,3 @@ The project is built in small, tested increments. The first milestone is a local
 ```text
 init -> backup -> check -> restore
 ```
-
