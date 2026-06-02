@@ -8,6 +8,10 @@ use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
+mod chunk;
+
+pub use chunk::{ChunkError, ChunkMetadata, StoreChunkOutcome, read_chunk, store_chunk};
+
 const CONFIG_FILE: &str = "config.toml";
 const FORMAT_VERSION: u32 = 0;
 const CHUNK_SIZE_BYTES: u64 = 4 * 1024 * 1024;

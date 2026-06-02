@@ -26,7 +26,7 @@ restore
 check
 ```
 
-Repository initialization is implemented. The remaining commands are placeholders while the first local backup vertical slice is completed.
+Repository initialization and the verified local chunk-storage layer are implemented. The remaining commands are placeholders while the first local backup vertical slice is completed.
 
 ## Development Approach
 
