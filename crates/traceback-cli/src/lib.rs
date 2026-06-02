@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use traceback_repo::{InitOutcome, RepositoryError, init_repository};
 
 #[derive(Debug, Parser)]
 #[command(name = "traceback")]
@@ -55,14 +56,24 @@ pub enum Command {
     },
 }
 
-pub fn run(cli: Cli) {
+pub fn run(cli: Cli) -> Result<(), RepositoryError> {
     match cli.command {
-        Command::Init { repo } => {
-            println!(
-                "Repository initialization is not implemented yet: {}",
-                repo.display()
-            );
-        }
+        Command::Init { repo } => match init_repository(&repo)? {
+            InitOutcome::Created(config) => {
+                println!(
+                    "Initialized TraceBack repository {} at {}",
+                    config.repository_id,
+                    repo.display()
+                );
+            }
+            InitOutcome::AlreadyInitialized(config) => {
+                println!(
+                    "TraceBack repository {} is already initialized at {}",
+                    config.repository_id,
+                    repo.display()
+                );
+            }
+        },
         Command::Backup { paths, repo } => {
             println!(
                 "Backup is not implemented yet: {} source path(s) -> {}",
@@ -94,6 +105,8 @@ pub fn run(cli: Cli) {
             );
         }
     }
+
+    Ok(())
 }
 
 #[cfg(test)]

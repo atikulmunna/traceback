@@ -11,3 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+traceback-repo = { path = "../traceback-repo" }
+
+[dev-dependencies]
+tempfile = "3.23"

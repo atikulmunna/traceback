@@ -26,7 +26,7 @@ restore
 check
 ```
 
-The commands are placeholders while the first local backup vertical slice is implemented.
+Repository initialization is implemented. The remaining commands are placeholders while the first local backup vertical slice is completed.
 
 ## Development Approach
 
