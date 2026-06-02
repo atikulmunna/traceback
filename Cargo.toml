@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/traceback-cli"]
+resolver = "3"

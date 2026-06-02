@@ -16,7 +16,17 @@ It aims to create deduplicated snapshots while making backup behavior easy to in
 
 ## Current Status
 
-TraceBack is in the initial implementation phase.
+TraceBack is in the initial implementation phase. The Rust CLI scaffold currently exposes:
+
+```text
+init
+backup
+snapshots
+restore
+check
+```
+
+The commands are placeholders while the first local backup vertical slice is implemented.
 
 ## Development Approach
 
