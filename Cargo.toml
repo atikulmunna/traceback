@@ -1,3 +1,7 @@
 [workspace]
-members = ["crates/traceback-cli", "crates/traceback-repo"]
+members = [
+    "crates/traceback-cli",
+    "crates/traceback-repo",
+    "crates/traceback-scan",
+]
 resolver = "3"
