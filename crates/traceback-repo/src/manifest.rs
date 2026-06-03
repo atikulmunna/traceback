@@ -193,6 +193,36 @@ pub fn read_manifest(
     Ok(manifest)
 }
 
+pub fn list_manifests(repository: &Path) -> Result<Vec<SnapshotManifest>, ManifestError> {
+    let snapshots = repository.join("snapshots");
+    let entries = fs::read_dir(&snapshots).map_err(|source| io_error(&snapshots, source))?;
+    let mut manifests = Vec::new();
+
+    for entry in entries {
+        let entry = entry.map_err(|source| io_error(&snapshots, source))?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+
+        let json = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
+        let manifest: SnapshotManifest =
+            serde_json::from_str(&json).map_err(|source| ManifestError::InvalidJson {
+                path: path.clone(),
+                source,
+            })?;
+        validate_manifest(&manifest)?;
+        manifests.push(manifest);
+    }
+
+    manifests.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.snapshot_id.cmp(&right.snapshot_id))
+    });
+    Ok(manifests)
+}
+
 fn manifest_path(repository: &Path, snapshot_id: &str) -> Result<PathBuf, ManifestError> {
     validate_snapshot_id(snapshot_id)?;
     Ok(repository
@@ -468,6 +498,31 @@ mod tests {
             .expect_err("missing chunk should be rejected");
 
         assert!(matches!(error, ManifestError::Chunk { .. }));
+    }
+
+    #[test]
+    fn lists_published_manifests_in_stable_order() {
+        let repository = tempdir().expect("temporary repository should be created");
+        init_repository(repository.path()).expect("repository should initialize");
+        let mut second = manifest();
+        second.snapshot_id = "snap_b".to_owned();
+        second.created_at = "2026-06-02T00:00:01Z".to_owned();
+        let mut first = manifest();
+        first.snapshot_id = "snap_a".to_owned();
+        first.created_at = "2026-06-02T00:00:00Z".to_owned();
+
+        write_manifest(repository.path(), &second).expect("second manifest should be written");
+        write_manifest(repository.path(), &first).expect("first manifest should be written");
+
+        let listed = super::list_manifests(repository.path()).expect("manifests should list");
+
+        assert_eq!(
+            listed
+                .iter()
+                .map(|manifest| manifest.snapshot_id.as_str())
+                .collect::<Vec<_>>(),
+            ["snap_a", "snap_b"]
+        );
     }
 
     fn manifest() -> SnapshotManifest {

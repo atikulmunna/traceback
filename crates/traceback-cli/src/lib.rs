@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
     FileEntry, FileType, InitOutcome, ManifestSummary, SnapshotManifest, StoreChunkOutcome,
-    init_repository, store_chunk, validate_repository, write_manifest,
+    init_repository, list_manifests, store_chunk, validate_repository, write_manifest,
 };
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
 use uuid::Uuid;
@@ -91,10 +91,26 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             println!("Snapshot ID:          {}", result.snapshot_id);
         }
         Command::Snapshots { repo } => {
-            println!(
-                "Snapshot listing is not implemented yet: {}",
-                repo.display()
-            );
+            validate_repository(&repo)?;
+            let manifests = list_manifests(&repo)?;
+            if manifests.is_empty() {
+                println!("No snapshots found.");
+            } else {
+                println!(
+                    "{:<36}  {:<20}  {:>12}  {:>12}  Sources",
+                    "ID", "Created", "Logical", "Stored"
+                );
+                for manifest in manifests {
+                    println!(
+                        "{:<36}  {:<20}  {:>12}  {:>12}  {}",
+                        manifest.snapshot_id,
+                        display_timestamp(&manifest.created_at),
+                        format!("{} B", manifest.summary.logical_bytes),
+                        format!("{} B", manifest.summary.newly_stored_bytes),
+                        manifest.sources.join(", ")
+                    );
+                }
+            }
         }
         Command::Restore {
             snapshot,
@@ -328,6 +344,13 @@ fn sanitize_manifest_segment(segment: &str) -> String {
             character => character,
         })
         .collect()
+}
+
+fn display_timestamp(timestamp: &str) -> String {
+    timestamp
+        .strip_suffix('Z')
+        .unwrap_or(timestamp)
+        .replace('T', " ")
 }
 
 #[cfg(test)]

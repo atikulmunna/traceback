@@ -13,8 +13,8 @@ mod manifest;
 
 pub use chunk::{ChunkError, ChunkMetadata, StoreChunkOutcome, read_chunk, store_chunk};
 pub use manifest::{
-    FileEntry, FileType, ManifestError, ManifestSummary, SnapshotManifest, read_manifest,
-    validate_manifest, verify_manifest_chunks, write_manifest,
+    FileEntry, FileType, ManifestError, ManifestSummary, SnapshotManifest, list_manifests,
+    read_manifest, validate_manifest, verify_manifest_chunks, write_manifest,
 };
 
 const CONFIG_FILE: &str = "config.toml";
