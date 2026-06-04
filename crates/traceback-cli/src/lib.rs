@@ -4,7 +4,8 @@ use clap::{Parser, Subcommand};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
     FileEntry, FileType, InitOutcome, ManifestSummary, SnapshotManifest, StoreChunkOutcome,
-    init_repository, list_manifests, store_chunk, validate_repository, write_manifest,
+    init_repository, list_manifests, restore_snapshot, store_chunk, validate_repository,
+    write_manifest,
 };
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
 use uuid::Uuid;
@@ -117,11 +118,14 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             repo,
             target,
         } => {
-            println!(
-                "Restore is not implemented yet: {snapshot} from {} -> {}",
-                repo.display(),
-                target.display()
-            );
+            validate_repository(&repo)?;
+            let summary = restore_snapshot(&repo, &snapshot, &target)?;
+            println!("Restore completed.");
+            println!("Snapshot ID:          {snapshot}");
+            println!("Files restored:       {}", summary.files);
+            println!("Directories restored: {}", summary.directories);
+            println!("Symlinks restored:    {}", summary.symlinks);
+            println!("Bytes restored:       {} B", summary.bytes);
         }
         Command::Check { repo } => {
             println!(

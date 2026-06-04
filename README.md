@@ -26,7 +26,7 @@ restore
 check
 ```
 
-Repository initialization, verified local chunk storage, snapshot manifest serialization, filesystem scanning, backup creation, and snapshot listing are implemented. The remaining commands are placeholders while the first local backup vertical slice is completed.
+Repository initialization, verified local chunk storage, snapshot manifest serialization, filesystem scanning, backup creation, snapshot listing, and full snapshot restore are implemented. The remaining commands are placeholders while the first local backup vertical slice is completed.
 
 ## Development Approach
 

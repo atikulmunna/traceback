@@ -10,12 +10,14 @@ use uuid::Uuid;
 
 mod chunk;
 mod manifest;
+mod restore;
 
 pub use chunk::{ChunkError, ChunkMetadata, StoreChunkOutcome, read_chunk, store_chunk};
 pub use manifest::{
     FileEntry, FileType, ManifestError, ManifestSummary, SnapshotManifest, list_manifests,
     read_manifest, validate_manifest, verify_manifest_chunks, write_manifest,
 };
+pub use restore::{RestoreError, RestoreSummary, restore_snapshot};
 
 const CONFIG_FILE: &str = "config.toml";
 const FORMAT_VERSION: u32 = 0;
