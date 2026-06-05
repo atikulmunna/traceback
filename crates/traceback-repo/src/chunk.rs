@@ -238,7 +238,7 @@ fn read_u64(path: &Path, cursor: &mut Cursor<&[u8]>) -> Result<u64, ChunkError> 
     Ok(u64::from_le_bytes(bytes))
 }
 
-fn chunk_path(repository: &Path, hash: &str) -> Result<PathBuf, ChunkError> {
+pub(crate) fn chunk_path(repository: &Path, hash: &str) -> Result<PathBuf, ChunkError> {
     if hash.len() != 64
         || !hash
             .bytes()

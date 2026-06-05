@@ -8,10 +8,12 @@ use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
+mod check;
 mod chunk;
 mod manifest;
 mod restore;
 
+pub use check::{CheckIssue, CheckReport, check_repository};
 pub use chunk::{ChunkError, ChunkMetadata, StoreChunkOutcome, read_chunk, store_chunk};
 pub use manifest::{
     FileEntry, FileType, ManifestError, ManifestSummary, SnapshotManifest, list_manifests,

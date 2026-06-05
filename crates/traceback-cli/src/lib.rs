@@ -3,9 +3,9 @@ use std::{error::Error, fs, path::PathBuf};
 use clap::{Parser, Subcommand};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
-    FileEntry, FileType, InitOutcome, ManifestSummary, SnapshotManifest, StoreChunkOutcome,
-    init_repository, list_manifests, restore_snapshot, store_chunk, validate_repository,
-    write_manifest,
+    CheckIssue, FileEntry, FileType, InitOutcome, ManifestSummary, SnapshotManifest,
+    StoreChunkOutcome, check_repository, init_repository, list_manifests, restore_snapshot,
+    store_chunk, validate_repository, write_manifest,
 };
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
 use uuid::Uuid;
@@ -128,10 +128,21 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             println!("Bytes restored:       {} B", summary.bytes);
         }
         Command::Check { repo } => {
-            println!(
-                "Repository check is not implemented yet: {}",
-                repo.display()
-            );
+            let report = check_repository(&repo);
+            println!("Repository check completed.");
+            println!("Manifests checked:    {}", report.manifests_checked);
+            println!("Chunks verified:      {}", report.chunks_verified);
+            println!("Orphaned chunks:      {}", report.orphaned_chunks);
+            println!("Staging leftovers:    {}", report.abandoned_staging_entries);
+            if report.passed() {
+                println!("Result:               PASS");
+            } else {
+                println!("Result:               FAIL");
+                for issue in &report.issues {
+                    println!("Issue:                {}", display_check_issue(issue));
+                }
+                return Err("repository check failed".into());
+            }
         }
     }
 
@@ -355,6 +366,10 @@ fn display_timestamp(timestamp: &str) -> String {
         .strip_suffix('Z')
         .unwrap_or(timestamp)
         .replace('T', " ")
+}
+
+fn display_check_issue(issue: &CheckIssue) -> String {
+    issue.to_string()
 }
 
 #[cfg(test)]
