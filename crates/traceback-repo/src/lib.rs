@@ -10,11 +10,13 @@ use uuid::Uuid;
 
 mod check;
 mod chunk;
+mod diff;
 mod manifest;
 mod restore;
 
 pub use check::{CheckIssue, CheckReport, check_repository};
 pub use chunk::{ChunkError, ChunkMetadata, StoreChunkOutcome, read_chunk, store_chunk};
+pub use diff::{DiffError, SnapshotDiff, diff_snapshots};
 pub use manifest::{
     FileEntry, FileType, ManifestError, ManifestSummary, SnapshotManifest, list_manifests,
     read_manifest, validate_manifest, verify_manifest_chunks, write_manifest,

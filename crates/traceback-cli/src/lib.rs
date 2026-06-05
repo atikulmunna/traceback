@@ -3,9 +3,9 @@ use std::{error::Error, fs, path::PathBuf};
 use clap::{Parser, Subcommand};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
-    CheckIssue, FileEntry, FileType, InitOutcome, ManifestSummary, SnapshotManifest,
-    StoreChunkOutcome, check_repository, init_repository, list_manifests, restore_snapshot,
-    store_chunk, validate_repository, write_manifest,
+    CheckIssue, FileEntry, FileType, InitOutcome, ManifestSummary, SnapshotDiff, SnapshotManifest,
+    StoreChunkOutcome, check_repository, diff_snapshots, init_repository, list_manifests,
+    restore_snapshot, store_chunk, validate_repository, write_manifest,
 };
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
 use uuid::Uuid;
@@ -57,6 +57,18 @@ pub enum Command {
     },
     /// Verify repository integrity.
     Check {
+        /// Backup repository directory.
+        #[arg(long)]
+        repo: PathBuf,
+    },
+    /// Compare two snapshots.
+    Diff {
+        /// Older snapshot ID.
+        old: String,
+
+        /// Newer snapshot ID.
+        new: String,
+
         /// Backup repository directory.
         #[arg(long)]
         repo: PathBuf,
@@ -143,6 +155,11 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 }
                 return Err("repository check failed".into());
             }
+        }
+        Command::Diff { old, new, repo } => {
+            validate_repository(&repo)?;
+            let diff = diff_snapshots(&repo, &old, &new)?;
+            print_snapshot_diff(&diff);
         }
     }
 
@@ -372,6 +389,30 @@ fn display_check_issue(issue: &CheckIssue) -> String {
     issue.to_string()
 }
 
+fn print_snapshot_diff(diff: &SnapshotDiff) {
+    println!("Snapshot diff completed.");
+    println!("Old snapshot:         {}", diff.old_snapshot_id);
+    println!("New snapshot:         {}", diff.new_snapshot_id);
+    println!("Added:                {}", diff.added.len());
+    println!("Removed:              {}", diff.removed.len());
+    println!("Modified:             {}", diff.modified.len());
+    println!("Unchanged:            {}", diff.unchanged);
+    if diff.changed_count() == 0 {
+        println!("No path changes found.");
+        return;
+    }
+
+    for path in &diff.added {
+        println!("A {}", path);
+    }
+    for path in &diff.removed {
+        println!("R {}", path);
+    }
+    for path in &diff.modified {
+        println!("M {}", path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser};
@@ -389,6 +430,14 @@ mod tests {
             vec!["traceback", "init", "./repo"],
             vec!["traceback", "backup", "./source", "--repo", "./repo"],
             vec!["traceback", "snapshots", "--repo", "./repo"],
+            vec![
+                "traceback",
+                "diff",
+                "snap_old",
+                "snap_new",
+                "--repo",
+                "./repo",
+            ],
             vec![
                 "traceback",
                 "restore",
