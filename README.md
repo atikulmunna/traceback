@@ -23,11 +23,12 @@ init
 backup
 snapshots
 restore
+rehearse
 check
 diff
 ```
 
-Repository initialization, verified local chunk storage, snapshot manifest serialization, filesystem scanning, backup creation, snapshot listing, full snapshot restore, repository integrity checks, and snapshot diffs are implemented.
+Repository initialization, verified local chunk storage, snapshot manifest serialization, filesystem scanning, backup creation, snapshot listing, full snapshot restore, restore rehearsal, repository integrity checks, and snapshot diffs are implemented.
 
 ## Development Approach
 

@@ -4,6 +4,7 @@ use std::{
 };
 
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::{
     ChunkError, FileEntry, FileType, ManifestError, SnapshotManifest, read_chunk, read_manifest,
@@ -53,6 +54,25 @@ pub fn restore_snapshot(
 ) -> Result<RestoreSummary, RestoreError> {
     let manifest = read_manifest(repository, snapshot_id)?;
     restore_manifest(repository, &manifest, target)
+}
+
+pub fn rehearse_restore(
+    repository: &Path,
+    snapshot_id: &str,
+) -> Result<RestoreSummary, RestoreError> {
+    let target =
+        std::env::temp_dir().join(format!("traceback-rehearse-{}", Uuid::new_v4().simple()));
+    let result = restore_snapshot(repository, snapshot_id, &target);
+    match result {
+        Ok(summary) => {
+            fs::remove_dir_all(&target).map_err(|source| io_error(&target, source))?;
+            Ok(summary)
+        }
+        Err(error) => {
+            let _ = fs::remove_dir_all(&target);
+            Err(error)
+        }
+    }
 }
 
 fn restore_manifest(
@@ -250,7 +270,7 @@ mod tests {
         store_chunk, write_manifest,
     };
 
-    use super::{RestoreError, restore_snapshot};
+    use super::{RestoreError, rehearse_restore, restore_snapshot};
 
     #[test]
     fn restores_files_and_directories() {
@@ -313,6 +333,40 @@ mod tests {
 
         let error = restore_snapshot(&repository, "snap_restore", &target)
             .expect_err("missing chunk should fail");
+
+        assert!(matches!(error, RestoreError::Manifest(_)));
+    }
+
+    #[test]
+    fn rehearses_restore_without_persistent_target() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        let StoreChunkOutcome::Stored(chunk) =
+            store_chunk(&repository, b"hello").expect("chunk should be stored")
+        else {
+            panic!("chunk should be newly stored");
+        };
+        write_manifest(&repository, &manifest("snap_restore", &chunk.hash))
+            .expect("manifest should be written");
+
+        let summary = rehearse_restore(&repository, "snap_restore").expect("rehearsal should work");
+
+        assert_eq!(summary.files, 1);
+        assert_eq!(summary.bytes, 5);
+    }
+
+    #[test]
+    fn rehearsal_fails_when_required_chunk_is_missing() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        let missing_hash = "a".repeat(64);
+        write_manifest(&repository, &manifest("snap_restore", &missing_hash))
+            .expect("manifest should be written");
+
+        let error = rehearse_restore(&repository, "snap_restore")
+            .expect_err("missing chunk should fail rehearsal");
 
         assert!(matches!(error, RestoreError::Manifest(_)));
     }

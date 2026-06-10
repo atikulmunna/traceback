@@ -5,3 +5,6 @@ repository_format_v0.md
 
 # Rust build output
 target/
+
+# Windows folder metadata
+desktop.ini

@@ -5,7 +5,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
     CheckIssue, FileEntry, FileType, InitOutcome, ManifestSummary, SnapshotDiff, SnapshotManifest,
     StoreChunkOutcome, check_repository, diff_snapshots, init_repository, list_manifests,
-    restore_snapshot, store_chunk, validate_repository, write_manifest,
+    rehearse_restore, restore_snapshot, store_chunk, validate_repository, write_manifest,
 };
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
 use uuid::Uuid;
@@ -54,6 +54,15 @@ pub enum Command {
         /// Directory or file path to restore into.
         #[arg(long)]
         target: PathBuf,
+    },
+    /// Test restoring a snapshot into a temporary directory.
+    Rehearse {
+        /// Snapshot ID to rehearse.
+        snapshot: String,
+
+        /// Backup repository directory.
+        #[arg(long)]
+        repo: PathBuf,
     },
     /// Verify repository integrity.
     Check {
@@ -138,6 +147,17 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             println!("Directories restored: {}", summary.directories);
             println!("Symlinks restored:    {}", summary.symlinks);
             println!("Bytes restored:       {} B", summary.bytes);
+        }
+        Command::Rehearse { snapshot, repo } => {
+            validate_repository(&repo)?;
+            let summary = rehearse_restore(&repo, &snapshot)?;
+            println!("Restore rehearsal completed.");
+            println!("Snapshot ID:          {snapshot}");
+            println!("Files verified:       {}", summary.files);
+            println!("Directories verified: {}", summary.directories);
+            println!("Symlinks verified:    {}", summary.symlinks);
+            println!("Bytes verified:       {} B", summary.bytes);
+            println!("Result:               PASS");
         }
         Command::Check { repo } => {
             let report = check_repository(&repo);
@@ -447,6 +467,7 @@ mod tests {
                 "--target",
                 "./restored",
             ],
+            vec!["traceback", "rehearse", "snap_001", "--repo", "./repo"],
             vec!["traceback", "check", "--repo", "./repo"],
         ];
 
