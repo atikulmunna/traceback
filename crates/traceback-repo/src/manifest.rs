@@ -7,6 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use uuid::Uuid;
 
 use crate::{ChunkError, read_chunk};
 
@@ -154,29 +155,58 @@ pub fn write_manifest(
     validate_manifest(manifest)?;
 
     let path = manifest_path(repository, &manifest.snapshot_id)?;
+    if path.exists() {
+        return Err(ManifestError::AlreadyExists(path));
+    }
     let parent = path
         .parent()
         .expect("manifest path has snapshots directory");
     fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+    let staging = repository.join("staging");
+    fs::create_dir_all(&staging).map_err(|source| io_error(&staging, source))?;
+    let staged_path = staging.join(format!(
+        "{}.{}.json.tmp",
+        manifest.snapshot_id,
+        Uuid::new_v4().simple()
+    ));
     let json =
         serde_json::to_string_pretty(manifest).map_err(|source| ManifestError::InvalidJson {
-            path: path.clone(),
+            path: staged_path.clone(),
             source,
         })?;
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&path)
-        .map_err(|source| {
-            if source.kind() == io::ErrorKind::AlreadyExists {
-                ManifestError::AlreadyExists(path.clone())
-            } else {
-                io_error(&path, source)
-            }
-        })?;
+        .open(&staged_path)
+        .map_err(|source| io_error(&staged_path, source))?;
     file.write_all(json.as_bytes())
         .and_then(|()| file.sync_all())
-        .map_err(|source| io_error(&path, source))?;
+        .map_err(|source| {
+            let _ = fs::remove_file(&staged_path);
+            io_error(&staged_path, source)
+        })?;
+    drop(file);
+
+    let staged_json =
+        fs::read_to_string(&staged_path).map_err(|source| io_error(&staged_path, source))?;
+    let staged_manifest: SnapshotManifest =
+        serde_json::from_str(&staged_json).map_err(|source| ManifestError::InvalidJson {
+            path: staged_path.clone(),
+            source,
+        })?;
+    if let Err(error) = validate_manifest(&staged_manifest) {
+        let _ = fs::remove_file(&staged_path);
+        return Err(error);
+    }
+
+    fs::rename(&staged_path, &path).map_err(|source| {
+        let _ = fs::remove_file(&staged_path);
+        if source.kind() == io::ErrorKind::AlreadyExists {
+            ManifestError::AlreadyExists(path.clone())
+        } else {
+            io_error(&path, source)
+        }
+    })?;
     Ok(path)
 }
 
@@ -385,6 +415,20 @@ mod tests {
             .expect_err("second manifest write should fail");
 
         assert!(matches!(error, ManifestError::AlreadyExists(_)));
+    }
+
+    #[test]
+    fn write_manifest_removes_staged_manifest_after_publish() {
+        let repository = tempdir().expect("temporary repository should be created");
+        init_repository(repository.path()).expect("repository should initialize");
+
+        write_manifest(repository.path(), &manifest()).expect("manifest should be written");
+
+        let staging_entries = std::fs::read_dir(repository.path().join("staging"))
+            .expect("staging should be readable")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("staging entries should be readable");
+        assert!(staging_entries.is_empty());
     }
 
     #[test]

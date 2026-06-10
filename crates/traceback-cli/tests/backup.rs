@@ -149,6 +149,36 @@ fn backup_respects_tracebackignore() {
 }
 
 #[test]
+fn backup_rejects_locked_repository() {
+    let temporary = tempdir().expect("temporary directory should be created");
+    let repository = temporary.path().join("repo");
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).expect("source directory should be created");
+    fs::write(source.join("note.txt"), "hello").expect("source file should be written");
+    assert!(
+        traceback()
+            .arg("init")
+            .arg(&repository)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(repository.join("locks").join("writer.lock"), "locked")
+        .expect("lock file should be written");
+
+    let backup = traceback()
+        .arg("backup")
+        .arg(&source)
+        .arg("--repo")
+        .arg(&repository)
+        .output()
+        .expect("backup should execute");
+
+    assert!(!backup.status.success());
+    assert!(String::from_utf8_lossy(&backup.stderr).contains("repository is locked"));
+}
+
+#[test]
 fn backup_rejects_repository_inside_source() {
     let temporary = tempdir().expect("temporary directory should be created");
     let source = temporary.path().join("source");

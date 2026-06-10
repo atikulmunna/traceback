@@ -4,8 +4,9 @@ use clap::{Parser, Subcommand};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
     CheckIssue, FileEntry, FileType, InitOutcome, ManifestSummary, SnapshotDiff, SnapshotManifest,
-    StoreChunkOutcome, check_repository, diff_snapshots, init_repository, list_manifests,
-    rehearse_restore, restore_snapshot, store_chunk, validate_repository, write_manifest,
+    StoreChunkOutcome, acquire_writer_lock, check_repository, diff_snapshots, init_repository,
+    list_manifests, rehearse_restore, restore_snapshot, store_chunk, validate_repository,
+    write_manifest,
 };
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
 use uuid::Uuid;
@@ -198,6 +199,7 @@ struct BackupResult {
 
 fn run_backup(paths: Vec<PathBuf>, repo: PathBuf) -> Result<BackupResult, Box<dyn Error>> {
     let config = validate_repository(&repo)?;
+    let _lock = acquire_writer_lock(&repo)?;
     let ignore_patterns = read_ignore_patterns(&paths)?;
     let mut options = ScanOptions::new(paths);
     options.repository = Some(repo.clone());

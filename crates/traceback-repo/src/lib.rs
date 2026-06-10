@@ -44,12 +44,26 @@ pub enum RepositoryError {
     UnsupportedConfig(String),
     #[error("repository is missing required directory: {0}")]
     MissingDirectory(PathBuf),
+    #[error("repository is locked by another writer: {0}")]
+    Locked(PathBuf),
     #[error("failed to serialize repository config: {0}")]
     SerializeConfig(#[from] toml::ser::Error),
     #[error("failed to format repository creation timestamp: {0}")]
     FormatTimestamp(#[from] time::error::Format),
     #[error("filesystem error at {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
+}
+
+#[derive(Debug)]
+pub struct RepositoryWriterLock {
+    path: PathBuf,
+    _file: fs::File,
+}
+
+impl Drop for RepositoryWriterLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +159,24 @@ pub fn validate_repository(path: &Path) -> Result<RepositoryConfig, RepositoryEr
     Ok(config)
 }
 
+pub fn acquire_writer_lock(repository: &Path) -> Result<RepositoryWriterLock, RepositoryError> {
+    validate_repository(repository)?;
+    let path = repository.join("locks").join("writer.lock");
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|source| {
+            if source.kind() == io::ErrorKind::AlreadyExists {
+                RepositoryError::Locked(path.clone())
+            } else {
+                io_error(&path, source)
+            }
+        })?;
+
+    Ok(RepositoryWriterLock { path, _file: file })
+}
+
 fn validate_config(config: &RepositoryConfig) -> Result<(), RepositoryError> {
     if config.format_version != FORMAT_VERSION {
         return Err(RepositoryError::UnsupportedConfig(format!(
@@ -198,8 +230,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CONFIG_FILE, InitOutcome, REPOSITORY_DIRECTORIES, RepositoryError, init_repository,
-        read_config,
+        CONFIG_FILE, InitOutcome, REPOSITORY_DIRECTORIES, RepositoryError, acquire_writer_lock,
+        init_repository, read_config,
     };
 
     #[test]
@@ -300,5 +332,29 @@ mod tests {
         let error = init_repository(&repository).expect_err("repository should be rejected");
 
         assert!(matches!(error, RepositoryError::UnsupportedConfig(_)));
+    }
+
+    #[test]
+    fn writer_lock_rejects_concurrent_writer() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        let _first = acquire_writer_lock(&repository).expect("first lock should be acquired");
+
+        let error = acquire_writer_lock(&repository).expect_err("second lock should fail");
+
+        assert!(matches!(error, RepositoryError::Locked(_)));
+    }
+
+    #[test]
+    fn writer_lock_releases_on_drop() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        {
+            let _lock = acquire_writer_lock(&repository).expect("lock should be acquired");
+        }
+
+        acquire_writer_lock(&repository).expect("lock should be reusable after drop");
     }
 }
