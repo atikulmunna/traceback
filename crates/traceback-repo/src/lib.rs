@@ -21,7 +21,9 @@ pub use manifest::{
     FileEntry, FileType, ManifestError, ManifestSummary, SnapshotManifest, list_manifests,
     read_manifest, validate_manifest, verify_manifest_chunks, write_manifest,
 };
-pub use restore::{RestoreError, RestoreSummary, rehearse_restore, restore_snapshot};
+pub use restore::{
+    RestoreError, RestoreSummary, rehearse_restore, restore_snapshot, restore_snapshot_path,
+};
 
 const CONFIG_FILE: &str = "config.toml";
 const FORMAT_VERSION: u32 = 0;

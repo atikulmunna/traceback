@@ -28,7 +28,7 @@ check
 diff
 ```
 
-Repository initialization, verified local chunk storage, staged snapshot manifest publication, filesystem scanning, backup creation with writer locking, snapshot listing, full snapshot restore, restore rehearsal, repository integrity checks, and snapshot diffs are implemented.
+Repository initialization, verified local chunk storage, staged snapshot manifest publication, filesystem scanning, backup creation with writer locking, snapshot listing, full and selected-path restore, restore rehearsal, repository integrity checks, and snapshot diffs are implemented.
 
 ## Development Approach
 

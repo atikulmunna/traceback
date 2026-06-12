@@ -19,6 +19,8 @@ pub enum RestoreError {
     Chunk(#[from] ChunkError),
     #[error("restore path escapes target: {0}")]
     PathEscapesTarget(String),
+    #[error("snapshot path was not found: {0}")]
+    PathNotFound(String),
     #[error("restore target already exists: {0}")]
     TargetExists(PathBuf),
     #[error("restored file hash mismatch for {path}: expected {expected}, found {actual}")]
@@ -54,6 +56,16 @@ pub fn restore_snapshot(
 ) -> Result<RestoreSummary, RestoreError> {
     let manifest = read_manifest(repository, snapshot_id)?;
     restore_manifest(repository, &manifest, target)
+}
+
+pub fn restore_snapshot_path(
+    repository: &Path,
+    snapshot_id: &str,
+    selected_path: &str,
+    target: &Path,
+) -> Result<RestoreSummary, RestoreError> {
+    let manifest = read_manifest(repository, snapshot_id)?;
+    restore_manifest_path(repository, &manifest, selected_path, target)
 }
 
 pub fn rehearse_restore(
@@ -113,6 +125,132 @@ fn restore_manifest(
     }
 
     Ok(summary)
+}
+
+fn restore_manifest_path(
+    repository: &Path,
+    manifest: &SnapshotManifest,
+    selected_path: &str,
+    target: &Path,
+) -> Result<RestoreSummary, RestoreError> {
+    validate_manifest(manifest)?;
+    let selected_path = normalize_selected_path(selected_path)?;
+    let selected_prefix = format!("{selected_path}/");
+    let mut entries = manifest
+        .files
+        .iter()
+        .filter(|entry| entry.path == selected_path || entry.path.starts_with(&selected_prefix))
+        .collect::<Vec<_>>();
+
+    if entries.is_empty() {
+        return Err(RestoreError::PathNotFound(selected_path));
+    }
+    verify_entries_chunks(repository, &entries)?;
+    entries.sort_by_key(|entry| {
+        (
+            match entry.file_type {
+                FileType::Directory => 0_u8,
+                FileType::File => 1,
+                FileType::Symlink => 2,
+            },
+            entry.path.matches('/').count(),
+        )
+    });
+
+    let root = absolute_target(target)?;
+    let selected_entry = entries
+        .iter()
+        .find(|entry| entry.path == selected_path)
+        .copied();
+    match selected_entry.map(|entry| entry.file_type) {
+        Some(FileType::File | FileType::Symlink) => {
+            if entries.len() != 1 {
+                return Err(RestoreError::PathNotFound(selected_path));
+            }
+            restore_single_entry_to_target(repository, &root, selected_entry.expect("entry exists"))
+        }
+        _ => restore_directory_selection(repository, &root, &selected_path, &entries),
+    }
+}
+
+fn restore_single_entry_to_target(
+    repository: &Path,
+    target: &Path,
+    entry: &FileEntry,
+) -> Result<RestoreSummary, RestoreError> {
+    let root = target
+        .parent()
+        .map(Path::to_owned)
+        .ok_or_else(|| RestoreError::PathEscapesTarget(target.display().to_string()))?;
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| RestoreError::PathEscapesTarget(target.display().to_string()))?;
+    let mut selected_entry = entry.clone();
+    selected_entry.path = file_name.to_owned();
+    let mut summary = RestoreSummary {
+        directories: 0,
+        files: 0,
+        symlinks: 0,
+        bytes: 0,
+    };
+    restore_entry(repository, &root, &selected_entry, &mut summary)?;
+    Ok(summary)
+}
+
+fn restore_directory_selection(
+    repository: &Path,
+    root: &Path,
+    selected_path: &str,
+    entries: &[&FileEntry],
+) -> Result<RestoreSummary, RestoreError> {
+    if root.exists() && !root.is_dir() {
+        return Err(RestoreError::TargetExists(root.to_owned()));
+    }
+    fs::create_dir_all(root).map_err(|source| io_error(root, source))?;
+
+    let mut summary = RestoreSummary {
+        directories: 0,
+        files: 0,
+        symlinks: 0,
+        bytes: 0,
+    };
+    for entry in entries {
+        if entry.path == selected_path {
+            if entry.file_type == FileType::Directory {
+                summary.directories += 1;
+            }
+            continue;
+        }
+
+        let mut rebased = (*entry).clone();
+        rebased.path = entry
+            .path
+            .strip_prefix(&format!("{selected_path}/"))
+            .expect("entry was filtered by selected prefix")
+            .to_owned();
+        restore_entry(repository, root, &rebased, &mut summary)?;
+    }
+
+    Ok(summary)
+}
+
+fn verify_entries_chunks(repository: &Path, entries: &[&FileEntry]) -> Result<(), RestoreError> {
+    for entry in entries {
+        for hash in &entry.chunks {
+            read_chunk(repository, hash)?;
+        }
+    }
+    Ok(())
+}
+
+fn normalize_selected_path(path: &str) -> Result<String, RestoreError> {
+    let path = path.trim_start_matches('/');
+    if path.is_empty() || path.contains('\\') || path.contains(':') || path.contains('\0') {
+        return Err(RestoreError::PathEscapesTarget(path.to_owned()));
+    }
+    let relative = lexical_relative_path(path)?;
+    Ok(relative.to_string_lossy().replace('\\', "/"))
 }
 
 fn restore_entry(
@@ -270,7 +408,7 @@ mod tests {
         store_chunk, write_manifest,
     };
 
-    use super::{RestoreError, rehearse_restore, restore_snapshot};
+    use super::{RestoreError, rehearse_restore, restore_snapshot, restore_snapshot_path};
 
     #[test]
     fn restores_files_and_directories() {
@@ -319,6 +457,78 @@ mod tests {
             .expect_err("restore should not overwrite");
 
         assert!(matches!(error, RestoreError::TargetExists(_)));
+    }
+
+    #[test]
+    fn restores_selected_file_to_exact_target() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let target = temporary.path().join("note.txt");
+        init_repository(&repository).expect("repository should initialize");
+        let StoreChunkOutcome::Stored(chunk) =
+            store_chunk(&repository, b"hello").expect("chunk should be stored")
+        else {
+            panic!("chunk should be newly stored");
+        };
+        write_manifest(&repository, &manifest("snap_restore", &chunk.hash))
+            .expect("manifest should be written");
+
+        let summary =
+            restore_snapshot_path(&repository, "snap_restore", "/source/file.txt", &target)
+                .expect("selected file should restore");
+
+        assert_eq!(summary.files, 1);
+        assert_eq!(
+            std::fs::read_to_string(target).expect("selected file should be readable"),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn restores_selected_directory_to_target_directory() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let target = temporary.path().join("selected");
+        init_repository(&repository).expect("repository should initialize");
+        let StoreChunkOutcome::Stored(chunk) =
+            store_chunk(&repository, b"hello").expect("chunk should be stored")
+        else {
+            panic!("chunk should be newly stored");
+        };
+        write_manifest(&repository, &manifest("snap_restore", &chunk.hash))
+            .expect("manifest should be written");
+
+        let summary = restore_snapshot_path(&repository, "snap_restore", "source", &target)
+            .expect("selected directory should restore");
+
+        assert_eq!(summary.directories, 1);
+        assert_eq!(summary.files, 1);
+        assert_eq!(
+            std::fs::read_to_string(target.join("file.txt"))
+                .expect("selected file should be readable"),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn selected_restore_reports_missing_path() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let target = temporary.path().join("missing");
+        init_repository(&repository).expect("repository should initialize");
+        let StoreChunkOutcome::Stored(chunk) =
+            store_chunk(&repository, b"hello").expect("chunk should be stored")
+        else {
+            panic!("chunk should be newly stored");
+        };
+        write_manifest(&repository, &manifest("snap_restore", &chunk.hash))
+            .expect("manifest should be written");
+
+        let error =
+            restore_snapshot_path(&repository, "snap_restore", "source/missing.txt", &target)
+                .expect_err("missing selected path should fail");
+
+        assert!(matches!(error, RestoreError::PathNotFound(_)));
     }
 
     #[test]

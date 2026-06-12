@@ -101,6 +101,140 @@ fn restore_refuses_to_overwrite_existing_files() {
 }
 
 #[test]
+fn restore_selected_file_to_exact_target() {
+    let temporary = tempdir().expect("temporary directory should be created");
+    let repository = temporary.path().join("repo");
+    let source = temporary.path().join("source");
+    let target = temporary.path().join("selected-note.txt");
+    fs::create_dir_all(source.join("notes")).expect("source directory should be created");
+    fs::write(source.join("notes").join("note.txt"), "hello")
+        .expect("source file should be written");
+    fs::write(source.join("other.txt"), "other").expect("other file should be written");
+    assert!(
+        traceback()
+            .arg("init")
+            .arg(&repository)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let backup = traceback()
+        .arg("backup")
+        .arg(&source)
+        .arg("--repo")
+        .arg(&repository)
+        .output()
+        .expect("backup should execute");
+    assert!(backup.status.success());
+    let snapshot_id = snapshot_id_from_output(&String::from_utf8_lossy(&backup.stdout));
+
+    let restore = traceback()
+        .arg("restore")
+        .arg(format!("{snapshot_id}:/source/notes/note.txt"))
+        .arg("--repo")
+        .arg(&repository)
+        .arg("--target")
+        .arg(&target)
+        .output()
+        .expect("restore should execute");
+
+    assert!(restore.status.success());
+    assert_eq!(
+        fs::read_to_string(&target).expect("selected file should be readable"),
+        "hello"
+    );
+    assert!(!temporary.path().join("selected-note.txt/source").exists());
+    assert!(String::from_utf8_lossy(&restore.stdout).contains("Files restored:       1"));
+}
+
+#[test]
+fn restore_selected_directory_to_target_directory() {
+    let temporary = tempdir().expect("temporary directory should be created");
+    let repository = temporary.path().join("repo");
+    let source = temporary.path().join("source");
+    let target = temporary.path().join("selected-notes");
+    fs::create_dir_all(source.join("notes")).expect("source directory should be created");
+    fs::write(source.join("notes").join("note.txt"), "hello")
+        .expect("source file should be written");
+    fs::write(source.join("other.txt"), "other").expect("other file should be written");
+    assert!(
+        traceback()
+            .arg("init")
+            .arg(&repository)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let backup = traceback()
+        .arg("backup")
+        .arg(&source)
+        .arg("--repo")
+        .arg(&repository)
+        .output()
+        .expect("backup should execute");
+    assert!(backup.status.success());
+    let snapshot_id = snapshot_id_from_output(&String::from_utf8_lossy(&backup.stdout));
+
+    let restore = traceback()
+        .arg("restore")
+        .arg(format!("{snapshot_id}:/source/notes"))
+        .arg("--repo")
+        .arg(&repository)
+        .arg("--target")
+        .arg(&target)
+        .output()
+        .expect("restore should execute");
+
+    assert!(restore.status.success());
+    assert_eq!(
+        fs::read_to_string(target.join("note.txt")).expect("selected file should be readable"),
+        "hello"
+    );
+    assert!(!target.join("other.txt").exists());
+}
+
+#[test]
+fn restore_selected_path_reports_missing_path() {
+    let temporary = tempdir().expect("temporary directory should be created");
+    let repository = temporary.path().join("repo");
+    let source = temporary.path().join("source");
+    let target = temporary.path().join("missing.txt");
+    fs::create_dir(&source).expect("source directory should be created");
+    fs::write(source.join("note.txt"), "hello").expect("source file should be written");
+    assert!(
+        traceback()
+            .arg("init")
+            .arg(&repository)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let backup = traceback()
+        .arg("backup")
+        .arg(&source)
+        .arg("--repo")
+        .arg(&repository)
+        .output()
+        .expect("backup should execute");
+    assert!(backup.status.success());
+    let snapshot_id = snapshot_id_from_output(&String::from_utf8_lossy(&backup.stdout));
+
+    let restore = traceback()
+        .arg("restore")
+        .arg(format!("{snapshot_id}:/source/missing.txt"))
+        .arg("--repo")
+        .arg(&repository)
+        .arg("--target")
+        .arg(&target)
+        .output()
+        .expect("restore should execute");
+
+    assert!(!restore.status.success());
+    assert!(String::from_utf8_lossy(&restore.stderr).contains("snapshot path was not found"));
+    assert!(!target.exists());
+}
+
+#[test]
 fn restore_fails_when_chunk_is_missing() {
     let temporary = tempdir().expect("temporary directory should be created");
     let repository = temporary.path().join("repo");

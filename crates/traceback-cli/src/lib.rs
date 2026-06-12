@@ -5,8 +5,8 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
     CheckIssue, FileEntry, FileType, InitOutcome, ManifestSummary, SnapshotDiff, SnapshotManifest,
     StoreChunkOutcome, acquire_writer_lock, check_repository, diff_snapshots, init_repository,
-    list_manifests, rehearse_restore, restore_snapshot, store_chunk, validate_repository,
-    write_manifest,
+    list_manifests, rehearse_restore, restore_snapshot, restore_snapshot_path, store_chunk,
+    validate_repository, write_manifest,
 };
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
 use uuid::Uuid;
@@ -141,7 +141,12 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             target,
         } => {
             validate_repository(&repo)?;
-            let summary = restore_snapshot(&repo, &snapshot, &target)?;
+            let summary =
+                if let Some((snapshot_id, selected_path)) = parse_restore_expression(&snapshot) {
+                    restore_snapshot_path(&repo, snapshot_id, selected_path, &target)?
+                } else {
+                    restore_snapshot(&repo, &snapshot, &target)?
+                };
             println!("Restore completed.");
             println!("Snapshot ID:          {snapshot}");
             println!("Files restored:       {}", summary.files);
@@ -411,6 +416,14 @@ fn display_check_issue(issue: &CheckIssue) -> String {
     issue.to_string()
 }
 
+fn parse_restore_expression(snapshot: &str) -> Option<(&str, &str)> {
+    let (snapshot_id, selected_path) = snapshot.split_once(':')?;
+    if snapshot_id.is_empty() || selected_path.is_empty() {
+        return None;
+    }
+    Some((snapshot_id, selected_path))
+}
+
 fn print_snapshot_diff(diff: &SnapshotDiff) {
     println!("Snapshot diff completed.");
     println!("Old snapshot:         {}", diff.old_snapshot_id);
@@ -468,6 +481,15 @@ mod tests {
                 "./repo",
                 "--target",
                 "./restored",
+            ],
+            vec![
+                "traceback",
+                "restore",
+                "snap_001:/source/file.txt",
+                "--repo",
+                "./repo",
+                "--target",
+                "./file.txt",
             ],
             vec!["traceback", "rehearse", "snap_001", "--repo", "./repo"],
             vec!["traceback", "check", "--repo", "./repo"],
