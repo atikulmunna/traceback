@@ -145,6 +145,38 @@ fn snapshots_rejects_invalid_published_manifest() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("manifest JSON is invalid"));
 }
 
+#[test]
+fn snapshots_reports_structured_manifest_error() {
+    let temporary = tempdir().expect("temporary directory should be created");
+    let repository = temporary.path().join("repo");
+    assert!(
+        traceback()
+            .arg("init")
+            .arg(&repository)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(
+        repository.join("snapshots").join("broken.json"),
+        "{not json",
+    )
+    .expect("broken manifest should be written");
+
+    let output = traceback()
+        .arg("snapshots")
+        .arg("--repo")
+        .arg(&repository)
+        .arg("--json")
+        .output()
+        .expect("snapshots should execute");
+
+    assert!(!output.status.success());
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("stderr should be valid JSON");
+    assert_eq!(json["error"]["code"], "manifest_invalid");
+}
+
 fn snapshot_id_from_output(output: &str) -> String {
     output
         .lines()

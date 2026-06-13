@@ -4,7 +4,8 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
-    CheckIssue, FileEntry, FileType, InitOutcome, ManifestSummary, SnapshotDiff, SnapshotManifest,
+    CheckIssue, ChunkError, DiffError, FileEntry, FileType, InitOutcome, ManifestError,
+    ManifestSummary, RepositoryError, RestoreError, SnapshotDiff, SnapshotManifest,
     StoreChunkOutcome, acquire_writer_lock, check_repository, diff_snapshots, init_repository,
     list_manifests, rehearse_restore, restore_snapshot, restore_snapshot_path, store_chunk,
     validate_repository, write_manifest,
@@ -222,6 +223,56 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+pub fn error_code(error: &(dyn Error + 'static)) -> &'static str {
+    if let Some(error) = error.downcast_ref::<RepositoryError>() {
+        return match error {
+            RepositoryError::NotDirectory(_) => "repository_not_directory",
+            RepositoryError::IncompatibleDirectory(_) => "repository_incompatible",
+            RepositoryError::InvalidConfig { .. } => "repository_config_invalid",
+            RepositoryError::UnsupportedConfig(_) => "repository_config_unsupported",
+            RepositoryError::MissingDirectory(_) => "repository_layout_invalid",
+            RepositoryError::Locked(_) => "repository_locked",
+            RepositoryError::SerializeConfig(_)
+            | RepositoryError::FormatTimestamp(_)
+            | RepositoryError::Io { .. } => "repository_io_error",
+        };
+    }
+    if let Some(error) = error.downcast_ref::<ManifestError>() {
+        return match error {
+            ManifestError::InvalidSnapshotId(_) => "snapshot_id_invalid",
+            ManifestError::AlreadyExists(_) => "snapshot_already_exists",
+            ManifestError::Chunk { .. } => "snapshot_chunk_invalid",
+            ManifestError::Io { .. } => "manifest_io_error",
+            _ => "manifest_invalid",
+        };
+    }
+    if let Some(error) = error.downcast_ref::<ChunkError>() {
+        return match error {
+            ChunkError::Io { .. } => "chunk_io_error",
+            ChunkError::Compression(_) | ChunkError::Decompression { .. } => "chunk_codec_error",
+            _ => "chunk_invalid",
+        };
+    }
+    if let Some(error) = error.downcast_ref::<RestoreError>() {
+        return match error {
+            RestoreError::PathNotFound(_) => "restore_path_not_found",
+            RestoreError::TargetExists(_) => "restore_target_exists",
+            RestoreError::PathEscapesTarget(_) => "restore_path_unsafe",
+            RestoreError::UnsupportedSymlinkTarget { .. } => "restore_symlink_unsafe",
+            RestoreError::HashMismatch { .. } | RestoreError::SizeMismatch { .. } => {
+                "restore_verification_failed"
+            }
+            RestoreError::Manifest(_) | RestoreError::Chunk(_) => "restore_data_invalid",
+            RestoreError::Io { .. } => "restore_io_error",
+        };
+    }
+    if error.downcast_ref::<DiffError>().is_some() {
+        return "diff_failed";
+    }
+
+    "command_failed"
 }
 
 #[derive(Serialize)]

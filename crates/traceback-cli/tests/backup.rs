@@ -179,6 +179,45 @@ fn backup_rejects_locked_repository() {
 }
 
 #[test]
+fn backup_reports_structured_lock_error() {
+    let temporary = tempdir().expect("temporary directory should be created");
+    let repository = temporary.path().join("repo");
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).expect("source directory should be created");
+    fs::write(source.join("note.txt"), "hello").expect("source file should be written");
+    assert!(
+        traceback()
+            .arg("init")
+            .arg(&repository)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(repository.join("locks").join("writer.lock"), "locked")
+        .expect("lock file should be written");
+
+    let backup = traceback()
+        .arg("--json")
+        .arg("backup")
+        .arg(&source)
+        .arg("--repo")
+        .arg(&repository)
+        .output()
+        .expect("backup should execute");
+
+    assert!(!backup.status.success());
+    let json: serde_json::Value =
+        serde_json::from_slice(&backup.stderr).expect("stderr should be valid JSON");
+    assert_eq!(json["error"]["code"], "repository_locked");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .expect("message should be a string")
+            .contains("repository is locked")
+    );
+}
+
+#[test]
 fn backup_rejects_repository_inside_source() {
     let temporary = tempdir().expect("temporary directory should be created");
     let source = temporary.path().join("source");

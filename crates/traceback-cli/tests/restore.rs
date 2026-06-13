@@ -235,6 +235,49 @@ fn restore_selected_path_reports_missing_path() {
 }
 
 #[test]
+fn restore_reports_structured_missing_path_error() {
+    let temporary = tempdir().expect("temporary directory should be created");
+    let repository = temporary.path().join("repo");
+    let source = temporary.path().join("source");
+    let target = temporary.path().join("missing.txt");
+    fs::create_dir(&source).expect("source directory should be created");
+    fs::write(source.join("note.txt"), "hello").expect("source file should be written");
+    assert!(
+        traceback()
+            .arg("init")
+            .arg(&repository)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let backup = traceback()
+        .arg("backup")
+        .arg(&source)
+        .arg("--repo")
+        .arg(&repository)
+        .output()
+        .expect("backup should execute");
+    assert!(backup.status.success());
+    let snapshot_id = snapshot_id_from_output(&String::from_utf8_lossy(&backup.stdout));
+
+    let restore = traceback()
+        .arg("--json")
+        .arg("restore")
+        .arg(format!("{snapshot_id}:/source/missing.txt"))
+        .arg("--repo")
+        .arg(&repository)
+        .arg("--target")
+        .arg(&target)
+        .output()
+        .expect("restore should execute");
+
+    assert!(!restore.status.success());
+    let json: serde_json::Value =
+        serde_json::from_slice(&restore.stderr).expect("stderr should be valid JSON");
+    assert_eq!(json["error"]["code"], "restore_path_not_found");
+}
+
+#[test]
 fn restore_fails_when_chunk_is_missing() {
     let temporary = tempdir().expect("temporary directory should be created");
     let repository = temporary.path().join("repo");
