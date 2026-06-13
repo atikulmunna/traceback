@@ -1,6 +1,8 @@
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use serde::{Deserialize, Serialize};
@@ -48,6 +50,11 @@ pub enum RepositoryError {
     MissingDirectory(PathBuf),
     #[error("repository is locked by another writer: {0}")]
     Locked(PathBuf),
+    #[error("repository writer lock is invalid at {path}: {source}")]
+    InvalidLock {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
     #[error("failed to serialize repository config: {0}")]
     SerializeConfig(#[from] toml::ser::Error),
     #[error("failed to format repository creation timestamp: {0}")]
@@ -60,6 +67,19 @@ pub enum RepositoryError {
 pub struct RepositoryWriterLock {
     path: PathBuf,
     _file: fs::File,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriterLockRecovery {
+    NoLock,
+    Active,
+    Recovered,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct WriterLockMetadata {
+    pid: u32,
+    created_at: String,
 }
 
 impl Drop for RepositoryWriterLock {
@@ -164,19 +184,88 @@ pub fn validate_repository(path: &Path) -> Result<RepositoryConfig, RepositoryEr
 pub fn acquire_writer_lock(repository: &Path) -> Result<RepositoryWriterLock, RepositoryError> {
     validate_repository(repository)?;
     let path = repository.join("locks").join("writer.lock");
-    let file = fs::OpenOptions::new()
+    match try_create_writer_lock(&path) {
+        Ok(lock) => Ok(lock),
+        Err(RepositoryError::Locked(_))
+            if recover_stale_writer_lock(repository)? == WriterLockRecovery::Recovered =>
+        {
+            try_create_writer_lock(&path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub fn recover_stale_writer_lock(repository: &Path) -> Result<WriterLockRecovery, RepositoryError> {
+    validate_repository(repository)?;
+    let path = repository.join("locks").join("writer.lock");
+    if !path.exists() {
+        return Ok(WriterLockRecovery::NoLock);
+    }
+
+    let contents = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
+    let metadata: WriterLockMetadata =
+        serde_json::from_str(&contents).map_err(|source| RepositoryError::InvalidLock {
+            path: path.clone(),
+            source,
+        })?;
+    if process_is_running(metadata.pid) {
+        return Ok(WriterLockRecovery::Active);
+    }
+
+    fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
+    Ok(WriterLockRecovery::Recovered)
+}
+
+fn try_create_writer_lock(path: &Path) -> Result<RepositoryWriterLock, RepositoryError> {
+    let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&path)
+        .open(path)
         .map_err(|source| {
             if source.kind() == io::ErrorKind::AlreadyExists {
-                RepositoryError::Locked(path.clone())
+                RepositoryError::Locked(path.to_owned())
             } else {
-                io_error(&path, source)
+                io_error(path, source)
             }
         })?;
+    let metadata = WriterLockMetadata {
+        pid: std::process::id(),
+        created_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
+    };
+    let contents = serde_json::to_vec(&metadata).expect("lock metadata should serialize");
+    file.write_all(&contents)
+        .and_then(|()| file.sync_all())
+        .map_err(|source| {
+            let _ = fs::remove_file(path);
+            io_error(path, source)
+        })?;
 
-    Ok(RepositoryWriterLock { path, _file: file })
+    Ok(RepositoryWriterLock {
+        path: path.to_owned(),
+        _file: file,
+    })
+}
+
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> bool {
+    let filter = format!("PID eq {pid}");
+    let Ok(output) = Command::new("tasklist")
+        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+        .output()
+    else {
+        return true;
+    };
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+}
+
+#[cfg(unix)]
+fn process_is_running(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(true)
 }
 
 fn validate_config(config: &RepositoryConfig) -> Result<(), RepositoryError> {
@@ -232,8 +321,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CONFIG_FILE, InitOutcome, REPOSITORY_DIRECTORIES, RepositoryError, acquire_writer_lock,
-        init_repository, read_config,
+        CONFIG_FILE, InitOutcome, REPOSITORY_DIRECTORIES, RepositoryError, WriterLockMetadata,
+        WriterLockRecovery, acquire_writer_lock, init_repository, read_config,
+        recover_stale_writer_lock,
     };
 
     #[test]
@@ -358,5 +448,67 @@ mod tests {
         }
 
         acquire_writer_lock(&repository).expect("lock should be reusable after drop");
+    }
+
+    #[test]
+    fn active_writer_lock_is_not_recovered() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        let _lock = acquire_writer_lock(&repository).expect("lock should be acquired");
+
+        let recovery =
+            recover_stale_writer_lock(&repository).expect("lock should be inspected safely");
+
+        assert_eq!(recovery, WriterLockRecovery::Active);
+    }
+
+    #[test]
+    fn dead_writer_lock_is_recovered() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        let lock_path = repository.join("locks").join("writer.lock");
+        fs::write(
+            &lock_path,
+            serde_json::to_vec(&WriterLockMetadata {
+                pid: u32::MAX,
+                created_at: "2026-06-13T00:00:00Z".to_owned(),
+            })
+            .expect("metadata should serialize"),
+        )
+        .expect("stale lock should be written");
+
+        let recovery = recover_stale_writer_lock(&repository).expect("stale lock should recover");
+
+        assert_eq!(recovery, WriterLockRecovery::Recovered);
+        assert!(!lock_path.exists());
+        acquire_writer_lock(&repository).expect("writer lock should be available");
+    }
+
+    #[test]
+    fn malformed_writer_lock_is_not_removed() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        let lock_path = repository.join("locks").join("writer.lock");
+        fs::write(&lock_path, "not json").expect("invalid lock should be written");
+
+        let error = recover_stale_writer_lock(&repository)
+            .expect_err("malformed lock should require manual inspection");
+
+        assert!(matches!(error, RepositoryError::InvalidLock { .. }));
+        assert!(lock_path.exists());
+    }
+
+    #[test]
+    fn recovery_reports_absent_lock() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+
+        let recovery = recover_stale_writer_lock(&repository).expect("absence should be safe");
+
+        assert_eq!(recovery, WriterLockRecovery::NoLock);
     }
 }

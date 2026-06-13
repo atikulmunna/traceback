@@ -163,8 +163,8 @@ fn backup_rejects_locked_repository() {
             .unwrap()
             .success()
     );
-    fs::write(repository.join("locks").join("writer.lock"), "locked")
-        .expect("lock file should be written");
+    let _lock =
+        traceback_repo::acquire_writer_lock(&repository).expect("writer lock should be acquired");
 
     let backup = traceback()
         .arg("backup")
@@ -193,8 +193,8 @@ fn backup_reports_structured_lock_error() {
             .unwrap()
             .success()
     );
-    fs::write(repository.join("locks").join("writer.lock"), "locked")
-        .expect("lock file should be written");
+    let _lock =
+        traceback_repo::acquire_writer_lock(&repository).expect("writer lock should be acquired");
 
     let backup = traceback()
         .arg("--json")

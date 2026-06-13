@@ -234,6 +234,7 @@ pub fn error_code(error: &(dyn Error + 'static)) -> &'static str {
             RepositoryError::UnsupportedConfig(_) => "repository_config_unsupported",
             RepositoryError::MissingDirectory(_) => "repository_layout_invalid",
             RepositoryError::Locked(_) => "repository_locked",
+            RepositoryError::InvalidLock { .. } => "repository_lock_invalid",
             RepositoryError::SerializeConfig(_)
             | RepositoryError::FormatTimestamp(_)
             | RepositoryError::Io { .. } => "repository_io_error",
