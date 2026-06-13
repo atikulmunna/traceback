@@ -103,6 +103,74 @@ fn repeated_backup_reuses_existing_chunks() {
 }
 
 #[test]
+fn backup_streams_large_files_into_multiple_chunks() {
+    let temporary = tempdir().expect("temporary directory should be created");
+    let repository = temporary.path().join("repo");
+    let source = temporary.path().join("source");
+    let target = temporary.path().join("restored");
+    fs::create_dir(&source).expect("source should be created");
+    let content = vec![0x5a; 5 * 1024 * 1024];
+    fs::write(source.join("large.bin"), &content).expect("large file should be written");
+    assert!(
+        traceback()
+            .arg("init")
+            .arg(&repository)
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let backup = traceback()
+        .arg("backup")
+        .arg(&source)
+        .arg("--repo")
+        .arg(&repository)
+        .output()
+        .expect("backup should execute");
+
+    assert!(backup.status.success());
+    let snapshot_id = snapshot_id_from_output(&String::from_utf8_lossy(&backup.stdout));
+    let manifest: Value = serde_json::from_str(
+        &fs::read_to_string(
+            repository
+                .join("snapshots")
+                .join(format!("{snapshot_id}.json")),
+        )
+        .expect("manifest should be readable"),
+    )
+    .expect("manifest should be valid JSON");
+    let large_file = manifest["files"]
+        .as_array()
+        .expect("files should be an array")
+        .iter()
+        .find(|file| file["path"] == "source/large.bin")
+        .expect("large file should be listed");
+    assert_eq!(
+        large_file["chunks"]
+            .as_array()
+            .expect("chunks should be an array")
+            .len(),
+        2
+    );
+
+    let restore = traceback()
+        .arg("restore")
+        .arg(&snapshot_id)
+        .arg("--repo")
+        .arg(&repository)
+        .arg("--target")
+        .arg(&target)
+        .output()
+        .expect("restore should execute");
+    assert!(restore.status.success());
+    assert_eq!(
+        fs::read(target.join("source").join("large.bin"))
+            .expect("restored large file should be readable"),
+        content
+    );
+}
+
+#[test]
 fn backup_respects_tracebackignore() {
     let temporary = tempdir().expect("temporary directory should be created");
     let repository = temporary.path().join("repo");

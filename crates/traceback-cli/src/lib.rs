@@ -1,4 +1,4 @@
-use std::{error::Error, fs, path::PathBuf};
+use std::{error::Error, fs, io::Read, path::PathBuf, time::SystemTime};
 
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -392,6 +392,13 @@ struct BackupResult {
     warning_count: usize,
 }
 
+struct StreamedFile {
+    chunks: Vec<String>,
+    newly_stored_bytes: u64,
+    content_hash: String,
+    size: u64,
+}
+
 fn run_backup(paths: Vec<PathBuf>, repo: PathBuf) -> Result<BackupResult, Box<dyn Error>> {
     let config = validate_repository(&repo)?;
     let _lock = acquire_writer_lock(&repo)?;
@@ -406,14 +413,19 @@ fn run_backup(paths: Vec<PathBuf>, repo: PathBuf) -> Result<BackupResult, Box<dy
     let mut file_count = 0_u64;
     let mut logical_bytes = 0_u64;
     let mut newly_stored_bytes = 0_u64;
+    let mut warning_count = inventory.warnings.len();
 
     for entry in &inventory.entries {
         if entry.relative_path == "." && entry.file_type == ScannedFileType::Directory {
             continue;
         }
 
-        let (file_entry, entry_newly_stored_bytes) =
-            build_file_entry(&repo, entry, config.chunk_size_bytes)?;
+        let Some((file_entry, entry_newly_stored_bytes)) =
+            build_file_entry(&repo, entry, config.chunk_size_bytes)?
+        else {
+            warning_count += 1;
+            continue;
+        };
         if file_entry.file_type == FileType::File {
             file_count += 1;
             logical_bytes = logical_bytes
@@ -453,7 +465,7 @@ fn run_backup(paths: Vec<PathBuf>, repo: PathBuf) -> Result<BackupResult, Box<dy
         logical_bytes,
         newly_stored_bytes,
         ignored_count: inventory.ignored_count,
-        warning_count: inventory.warnings.len(),
+        warning_count,
     })
 }
 
@@ -488,10 +500,10 @@ fn build_file_entry(
     repo: &std::path::Path,
     entry: &ScannedEntry,
     chunk_size_bytes: u64,
-) -> Result<(FileEntry, u64), Box<dyn Error>> {
+) -> Result<Option<(FileEntry, u64)>, Box<dyn Error>> {
     let path = manifest_path(entry);
     match entry.file_type {
-        ScannedFileType::Directory => Ok((
+        ScannedFileType::Directory => Ok(Some((
             FileEntry {
                 path,
                 file_type: FileType::Directory,
@@ -502,27 +514,9 @@ fn build_file_entry(
                 symlink_target: None,
             },
             0,
-        )),
-        ScannedFileType::File => {
-            let content = entry
-                .content
-                .as_deref()
-                .ok_or("scanner did not provide file content")?;
-            let (chunks, newly_stored_bytes) = store_file_chunks(repo, content, chunk_size_bytes)?;
-            Ok((
-                FileEntry {
-                    path,
-                    file_type: FileType::File,
-                    size: entry.size,
-                    modified_at: entry.modified_at.clone(),
-                    content_hash: Some(blake3::hash(content).to_hex().to_string()),
-                    chunks,
-                    symlink_target: None,
-                },
-                newly_stored_bytes,
-            ))
-        }
-        ScannedFileType::Symlink => Ok((
+        ))),
+        ScannedFileType::File => stream_file_entry(repo, entry, path, chunk_size_bytes),
+        ScannedFileType::Symlink => Ok(Some((
             FileEntry {
                 path,
                 file_type: FileType::Symlink,
@@ -536,22 +530,76 @@ fn build_file_entry(
                     .map(|target| target.to_string_lossy().replace('\\', "/")),
             },
             0,
-        )),
+        ))),
     }
+}
+
+fn stream_file_entry(
+    repo: &std::path::Path,
+    entry: &ScannedEntry,
+    manifest_path: String,
+    chunk_size_bytes: u64,
+) -> Result<Option<(FileEntry, u64)>, Box<dyn Error>> {
+    let mut total_newly_stored_bytes = 0_u64;
+    for attempt in 0..2 {
+        let before = fs::metadata(&entry.path)?;
+        let streamed = store_file_chunks(repo, &entry.path, chunk_size_bytes)?;
+        maybe_mutate_streamed_file_for_test(&entry.path)?;
+        total_newly_stored_bytes = total_newly_stored_bytes
+            .checked_add(streamed.newly_stored_bytes)
+            .ok_or("stored byte count overflows u64")?;
+        let after = fs::metadata(&entry.path)?;
+        if metadata_matches(&before, &after) {
+            return Ok(Some((
+                FileEntry {
+                    path: manifest_path.clone(),
+                    file_type: FileType::File,
+                    size: streamed.size,
+                    modified_at: metadata_modified_at(&after),
+                    content_hash: Some(streamed.content_hash),
+                    chunks: streamed.chunks,
+                    symlink_target: None,
+                },
+                total_newly_stored_bytes,
+            )));
+        }
+        if attempt == 0 {
+            continue;
+        }
+    }
+
+    Ok(None)
 }
 
 fn store_file_chunks(
     repo: &std::path::Path,
-    content: &[u8],
+    path: &std::path::Path,
     chunk_size_bytes: u64,
-) -> Result<(Vec<String>, u64), Box<dyn Error>> {
+) -> Result<StreamedFile, Box<dyn Error>> {
     let chunk_size = usize::try_from(chunk_size_bytes)?;
-    if content.is_empty() {
-        return Ok((Vec::new(), 0));
-    }
+    let mut file = fs::File::open(path)?;
     let mut chunks = Vec::new();
     let mut newly_stored_bytes = 0_u64;
-    for chunk in content.chunks(chunk_size) {
+    let mut hasher = blake3::Hasher::new();
+    let mut total_size = 0_u64;
+    let mut buffer = vec![0_u8; chunk_size];
+    loop {
+        let mut filled = 0;
+        while filled < buffer.len() {
+            let read = file.read(&mut buffer[filled..])?;
+            if read == 0 {
+                break;
+            }
+            filled += read;
+        }
+        if filled == 0 {
+            break;
+        }
+        let chunk = &buffer[..filled];
+        hasher.update(chunk);
+        total_size = total_size
+            .checked_add(u64::try_from(filled)?)
+            .ok_or("file size overflows u64")?;
         let outcome = store_chunk(repo, chunk)?;
         let hash = match outcome {
             StoreChunkOutcome::Stored(metadata) => {
@@ -563,8 +611,48 @@ fn store_file_chunks(
             StoreChunkOutcome::AlreadyExists(metadata) => metadata.hash,
         };
         chunks.push(hash);
+        if filled < buffer.len() {
+            break;
+        }
     }
-    Ok((chunks, newly_stored_bytes))
+    Ok(StreamedFile {
+        chunks,
+        newly_stored_bytes,
+        content_hash: hasher.finalize().to_hex().to_string(),
+        size: total_size,
+    })
+}
+
+fn metadata_matches(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    before.len() == after.len()
+        && before.modified().ok() == after.modified().ok()
+        && before.file_type() == after.file_type()
+}
+
+fn metadata_modified_at(metadata: &fs::Metadata) -> Option<String> {
+    let modified = metadata.modified().ok()?;
+    let duration = modified.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+    OffsetDateTime::from_unix_timestamp(i64::try_from(duration.as_secs()).ok()?)
+        .ok()?
+        .format(&Rfc3339)
+        .ok()
+}
+
+#[cfg(not(test))]
+fn maybe_mutate_streamed_file_for_test(_path: &std::path::Path) -> Result<(), std::io::Error> {
+    Ok(())
+}
+
+#[cfg(test)]
+fn maybe_mutate_streamed_file_for_test(path: &std::path::Path) -> Result<(), std::io::Error> {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "changing.txt")
+    {
+        fs::write(path, format!("changed-{}", Uuid::new_v4()))?;
+    }
+    Ok(())
 }
 
 fn manifest_path(entry: &ScannedEntry) -> String {
@@ -641,8 +729,11 @@ fn print_snapshot_diff(diff: &SnapshotDiff) {
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser};
+    use tempfile::tempdir;
+    use traceback_repo::init_repository;
+    use traceback_scan::{ScannedEntry, ScannedFileType};
 
-    use super::{Cli, Command};
+    use super::{Cli, Command, stream_file_entry};
 
     #[test]
     fn cli_definition_is_valid() {
@@ -707,5 +798,35 @@ mod tests {
         let cli = Cli::parse_from(["traceback", "check", "--repo", "./repo"]);
 
         assert!(matches!(cli.command, Command::Check { .. }));
+    }
+
+    #[test]
+    fn streaming_reader_skips_file_that_changes_twice() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let source = temporary.path().join("source");
+        std::fs::create_dir(&source).expect("source should be created");
+        let path = source.join("changing.txt");
+        std::fs::write(&path, "before").expect("file should be written");
+        init_repository(&repository).expect("repository should initialize");
+        let entry = ScannedEntry {
+            source,
+            path,
+            relative_path: "changing.txt".to_owned(),
+            file_type: ScannedFileType::File,
+            size: 6,
+            modified_at: None,
+            symlink_target: None,
+        };
+
+        let result = stream_file_entry(
+            &repository,
+            &entry,
+            "source/changing.txt".to_owned(),
+            4 * 1024 * 1024,
+        )
+        .expect("changing file should be handled");
+
+        assert!(result.is_none());
     }
 }

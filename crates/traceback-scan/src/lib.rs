@@ -1,6 +1,5 @@
 use std::{
-    fs,
-    io::{self, Read},
+    fs, io,
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -68,7 +67,6 @@ pub struct ScannedEntry {
     pub size: u64,
     pub modified_at: Option<String>,
     pub symlink_target: Option<PathBuf>,
-    pub content: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,7 +159,6 @@ fn scan_path(
             size: 0,
             modified_at: modified_at(&metadata),
             symlink_target: None,
-            content: None,
         });
         scan_directory_children(source, path, ignore_set, changing_file_policy, inventory)?;
     } else if file_type.is_symlink() {
@@ -174,7 +171,6 @@ fn scan_path(
                 size: 0,
                 modified_at: modified_at(&metadata),
                 symlink_target: Some(target),
-                content: None,
             }),
             Err(source) => inventory.warnings.push(ScanWarning::Unreadable {
                 path: path.to_owned(),
@@ -182,25 +178,16 @@ fn scan_path(
             }),
         }
     } else if file_type.is_file() {
-        match read_stable_file(path, changing_file_policy) {
-            Ok(Some((metadata, content))) => inventory.entries.push(ScannedEntry {
-                source: source.to_owned(),
-                path: path.to_owned(),
-                relative_path,
-                file_type: ScannedFileType::File,
-                size: metadata.len(),
-                modified_at: modified_at(&metadata),
-                symlink_target: None,
-                content: Some(content),
-            }),
-            Ok(None) => inventory
-                .warnings
-                .push(ScanWarning::FileChanged(path.to_owned())),
-            Err(source) => inventory.warnings.push(ScanWarning::Unreadable {
-                path: path.to_owned(),
-                message: source.to_string(),
-            }),
-        }
+        let _ = changing_file_policy;
+        inventory.entries.push(ScannedEntry {
+            source: source.to_owned(),
+            path: path.to_owned(),
+            relative_path,
+            file_type: ScannedFileType::File,
+            size: metadata.len(),
+            modified_at: modified_at(&metadata),
+            symlink_target: None,
+        });
     } else {
         inventory
             .warnings
@@ -244,50 +231,6 @@ fn scan_directory_children(
     }
 
     Ok(())
-}
-
-fn read_stable_file(
-    path: &Path,
-    policy: ChangingFilePolicy,
-) -> Result<Option<(fs::Metadata, Vec<u8>)>, io::Error> {
-    let first = read_file_once(path)?;
-    if first.changed {
-        return match policy {
-            ChangingFilePolicy::RetryThenWarn => {
-                let second = read_file_once(path)?;
-                if second.changed {
-                    Ok(None)
-                } else {
-                    Ok(Some((second.after, second.content)))
-                }
-            }
-            ChangingFilePolicy::FailFast => Ok(None),
-        };
-    }
-
-    Ok(Some((first.after, first.content)))
-}
-
-struct FileRead {
-    after: fs::Metadata,
-    content: Vec<u8>,
-    changed: bool,
-}
-
-fn read_file_once(path: &Path) -> Result<FileRead, io::Error> {
-    let before = fs::metadata(path)?;
-    maybe_mutate_file_for_test(path, &before)?;
-    let mut file = fs::File::open(path)?;
-    let mut content = Vec::new();
-    file.read_to_end(&mut content)?;
-    let after = fs::metadata(path)?;
-    let changed = before.len() != after.len() || modified(&before) != modified(&after);
-
-    Ok(FileRead {
-        after,
-        content,
-        changed,
-    })
 }
 
 fn build_ignore_set(patterns: &[String]) -> Result<GlobSet, ScanError> {
@@ -398,34 +341,16 @@ fn io_error(path: &Path, source: io::Error) -> ScanError {
     }
 }
 
-#[cfg(not(test))]
-fn maybe_mutate_file_for_test(_path: &Path, _before: &fs::Metadata) -> Result<(), io::Error> {
-    Ok(())
-}
-
-#[cfg(test)]
-fn maybe_mutate_file_for_test(path: &Path, _before: &fs::Metadata) -> Result<(), io::Error> {
-    if path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name == "changing.txt")
-    {
-        fs::write(path, "after")?;
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
 
     use tempfile::tempdir;
 
-    use super::{ChangingFilePolicy, ScanError, ScanOptions, ScanWarning, ScannedFileType, scan};
+    use super::{ScanError, ScanOptions, ScanWarning, ScannedFileType, scan};
 
     #[test]
-    fn scans_files_directories_and_contents() {
+    fn scans_files_and_directories_without_loading_contents() {
         let temporary = tempdir().expect("temporary directory should be created");
         let source = temporary.path().join("source");
         fs::create_dir(&source).expect("source should be created");
@@ -437,7 +362,7 @@ mod tests {
         assert!(inventory.entries.iter().any(|entry| {
             entry.relative_path == "notes/a.txt"
                 && entry.file_type == ScannedFileType::File
-                && entry.content.as_deref() == Some(b"hello".as_slice())
+                && entry.size == 5
         }));
         assert!(inventory.entries.iter().any(|entry| {
             entry.relative_path == "notes" && entry.file_type == ScannedFileType::Directory
@@ -534,27 +459,6 @@ mod tests {
             .expect_err("missing source should fail");
 
         assert!(matches!(error, ScanError::SourceMissing(_)));
-    }
-
-    #[test]
-    fn detects_files_that_change_during_read() {
-        let temporary = tempdir().expect("temporary directory should be created");
-        let source = temporary.path().join("source");
-        fs::create_dir(&source).expect("source should be created");
-        let file = source.join("changing.txt");
-        fs::write(&file, "before").expect("file should be written");
-
-        let mut options = ScanOptions::new(vec![source]);
-        options.changing_file_policy = ChangingFilePolicy::FailFast;
-
-        let inventory = scan(&options).expect("scan should succeed");
-
-        assert!(
-            inventory
-                .warnings
-                .iter()
-                .any(|warning| matches!(warning, ScanWarning::FileChanged(_)))
-        );
     }
 
     #[cfg(unix)]
