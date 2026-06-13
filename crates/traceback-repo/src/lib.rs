@@ -14,6 +14,7 @@ mod check;
 mod chunk;
 mod diff;
 mod manifest;
+mod recovery;
 mod restore;
 
 pub use check::{CheckIssue, CheckReport, check_repository};
@@ -23,6 +24,7 @@ pub use manifest::{
     FileEntry, FileType, ManifestError, ManifestSummary, SnapshotManifest, list_manifests,
     read_manifest, validate_manifest, verify_manifest_chunks, write_manifest,
 };
+pub use recovery::{RecoveryError, RecoveryReport, recover_interrupted_writes};
 pub use restore::{
     RestoreError, RestoreSummary, rehearse_restore, restore_snapshot, restore_snapshot_path,
 };

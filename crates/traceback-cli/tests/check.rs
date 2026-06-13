@@ -63,6 +63,7 @@ fn check_supports_json_output_for_failure() {
     assert_eq!(json["chunks_verified"], 0);
     assert_eq!(json["orphaned_chunks"], 0);
     assert_eq!(json["staging_leftovers"], 0);
+    assert_eq!(json["temporary_chunk_files"], 0);
     assert!(
         json["issues"][0]
             .as_str()

@@ -30,6 +30,8 @@ pub enum CheckIssue {
     OrphanedChunk(PathBuf),
     #[error("abandoned staging data found: {0}")]
     AbandonedStaging(PathBuf),
+    #[error("abandoned temporary chunk found: {0}")]
+    AbandonedTemporaryChunk(PathBuf),
     #[error("filesystem error at {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
 }
@@ -40,6 +42,7 @@ pub struct CheckReport {
     pub chunks_verified: usize,
     pub orphaned_chunks: usize,
     pub abandoned_staging_entries: usize,
+    pub temporary_chunk_files: usize,
     pub issues: Vec<CheckIssue>,
 }
 
@@ -211,6 +214,13 @@ fn collect_orphaned_chunks(
             let Some(hash) = chunk_file.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
+            if hash.starts_with(".tmp-") {
+                report.temporary_chunk_files += 1;
+                report
+                    .issues
+                    .push(CheckIssue::AbandonedTemporaryChunk(chunk_file));
+                continue;
+            }
             if !referenced_chunks.contains(hash) {
                 report.orphaned_chunks += 1;
                 report.issues.push(CheckIssue::OrphanedChunk(chunk_file));
@@ -338,6 +348,28 @@ mod tests {
                 .issues
                 .iter()
                 .any(|issue| matches!(issue, CheckIssue::AbandonedStaging(_)))
+        );
+    }
+
+    #[test]
+    fn reports_abandoned_temporary_chunk() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        let shard = repository.join("chunks").join("aa");
+        std::fs::create_dir(&shard).expect("chunk shard should be created");
+        std::fs::write(shard.join(".tmp-abandoned"), "temporary")
+            .expect("temporary chunk should be written");
+
+        let report = check_repository(&repository);
+
+        assert!(!report.passed());
+        assert_eq!(report.temporary_chunk_files, 1);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| matches!(issue, CheckIssue::AbandonedTemporaryChunk(_)))
         );
     }
 

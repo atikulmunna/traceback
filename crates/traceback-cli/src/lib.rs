@@ -5,10 +5,10 @@ use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
     CheckIssue, ChunkError, DiffError, FileEntry, FileType, InitOutcome, ManifestError,
-    ManifestSummary, RepositoryError, RestoreError, SnapshotDiff, SnapshotManifest,
+    ManifestSummary, RecoveryError, RepositoryError, RestoreError, SnapshotDiff, SnapshotManifest,
     StoreChunkOutcome, acquire_writer_lock, check_repository, diff_snapshots, init_repository,
-    list_manifests, rehearse_restore, restore_snapshot, restore_snapshot_path, store_chunk,
-    validate_repository, write_manifest,
+    list_manifests, recover_interrupted_writes, rehearse_restore, restore_snapshot,
+    restore_snapshot_path, store_chunk, validate_repository, write_manifest,
 };
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
 use uuid::Uuid;
@@ -73,6 +73,12 @@ pub enum Command {
     },
     /// Verify repository integrity.
     Check {
+        /// Backup repository directory.
+        #[arg(long)]
+        repo: PathBuf,
+    },
+    /// Remove abandoned staging and temporary chunk artifacts.
+    Recover {
         /// Backup repository directory.
         #[arg(long)]
         repo: PathBuf,
@@ -190,6 +196,7 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                     chunks_verified: report.chunks_verified,
                     orphaned_chunks: report.orphaned_chunks,
                     staging_leftovers: report.abandoned_staging_entries,
+                    temporary_chunk_files: report.temporary_chunk_files,
                     issues,
                 })?;
             } else {
@@ -198,6 +205,7 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 println!("Chunks verified:      {}", report.chunks_verified);
                 println!("Orphaned chunks:      {}", report.orphaned_chunks);
                 println!("Staging leftovers:    {}", report.abandoned_staging_entries);
+                println!("Temporary chunks:     {}", report.temporary_chunk_files);
                 if passed {
                     println!("Result:               PASS");
                 } else {
@@ -209,6 +217,25 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             }
             if !passed {
                 return Err("repository check failed".into());
+            }
+        }
+        Command::Recover { repo } => {
+            let report = recover_interrupted_writes(&repo)?;
+            if json {
+                print_json(&RecoveryJson {
+                    staging_entries_removed: report.staging_entries_removed,
+                    temporary_chunks_removed: report.temporary_chunks_removed,
+                })?;
+            } else {
+                println!("Repository recovery completed.");
+                println!(
+                    "Staging entries removed: {}",
+                    report.staging_entries_removed
+                );
+                println!(
+                    "Temporary chunks removed: {}",
+                    report.temporary_chunks_removed
+                );
             }
         }
         Command::Diff { old, new, repo } => {
@@ -272,6 +299,12 @@ pub fn error_code(error: &(dyn Error + 'static)) -> &'static str {
     if error.downcast_ref::<DiffError>().is_some() {
         return "diff_failed";
     }
+    if let Some(error) = error.downcast_ref::<RecoveryError>() {
+        return match error {
+            RecoveryError::Repository(_) => "recovery_repository_error",
+            RecoveryError::Io { .. } => "recovery_io_error",
+        };
+    }
 
     "command_failed"
 }
@@ -311,7 +344,14 @@ struct CheckJson {
     chunks_verified: usize,
     orphaned_chunks: usize,
     staging_leftovers: usize,
+    temporary_chunk_files: usize,
     issues: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct RecoveryJson {
+    staging_entries_removed: usize,
+    temporary_chunks_removed: usize,
 }
 
 #[derive(Serialize)]
@@ -643,6 +683,7 @@ mod tests {
             ],
             vec!["traceback", "rehearse", "snap_001", "--repo", "./repo"],
             vec!["traceback", "check", "--repo", "./repo"],
+            vec!["traceback", "recover", "--repo", "./repo"],
         ];
 
         for args in cases {
