@@ -1,5 +1,6 @@
 use std::{
-    fs, io,
+    fs,
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -274,14 +275,7 @@ fn restore_entry(
             }
             let parent = output.parent().expect("output path has parent");
             fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
-            let mut content = Vec::new();
-            for hash in &entry.chunks {
-                content.extend(read_chunk(repository, hash)?);
-            }
-            verify_file_content(&output, entry, &content)?;
-            fs::write(&output, &content).map_err(|source| io_error(&output, source))?;
-            let written = fs::read(&output).map_err(|source| io_error(&output, source))?;
-            verify_file_content(&output, entry, &written)?;
+            restore_file_streaming(repository, &output, entry)?;
             summary.files += 1;
             summary.bytes = summary
                 .bytes
@@ -309,9 +303,57 @@ fn restore_entry(
     Ok(())
 }
 
-fn verify_file_content(path: &Path, entry: &FileEntry, content: &[u8]) -> Result<(), RestoreError> {
-    let actual_size =
-        u64::try_from(content.len()).expect("usize fits into u64 on supported targets");
+fn restore_file_streaming(
+    repository: &Path,
+    output: &Path,
+    entry: &FileEntry,
+) -> Result<(), RestoreError> {
+    let parent = output.parent().expect("output path has parent");
+    let temporary = parent.join(format!(
+        ".traceback-restore-{}.tmp",
+        Uuid::new_v4().simple()
+    ));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|source| io_error(&temporary, source))?;
+        for hash in &entry.chunks {
+            let chunk = read_chunk(repository, hash)?;
+            file.write_all(&chunk)
+                .map_err(|source| io_error(&temporary, source))?;
+        }
+        file.sync_all()
+            .map_err(|source| io_error(&temporary, source))?;
+        drop(file);
+        verify_written_file(&temporary, entry)?;
+        fs::rename(&temporary, output).map_err(|source| io_error(output, source))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn verify_written_file(path: &Path, entry: &FileEntry) -> Result<(), RestoreError> {
+    let mut file = fs::File::open(path).map_err(|source| io_error(path, source))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut actual_size = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|source| io_error(path, source))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        actual_size = actual_size
+            .checked_add(u64::try_from(read).expect("usize fits into u64 on supported targets"))
+            .expect("restored byte count should fit u64");
+    }
+
     if actual_size != entry.size {
         return Err(RestoreError::SizeMismatch {
             path: path.to_owned(),
@@ -321,7 +363,7 @@ fn verify_file_content(path: &Path, entry: &FileEntry, content: &[u8]) -> Result
     }
 
     if let Some(expected) = &entry.content_hash {
-        let actual = blake3::hash(content).to_hex().to_string();
+        let actual = hasher.finalize().to_hex().to_string();
         if &actual != expected {
             return Err(RestoreError::HashMismatch {
                 path: path.to_owned(),
@@ -545,6 +587,37 @@ mod tests {
             .expect_err("missing chunk should fail");
 
         assert!(matches!(error, RestoreError::Manifest(_)));
+    }
+
+    #[test]
+    fn streaming_restore_removes_temporary_file_after_hash_failure() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let target = temporary.path().join("restore");
+        init_repository(&repository).expect("repository should initialize");
+        let StoreChunkOutcome::Stored(chunk) =
+            store_chunk(&repository, b"hello").expect("chunk should be stored")
+        else {
+            panic!("chunk should be newly stored");
+        };
+        let mut invalid = manifest("snap_restore", &chunk.hash);
+        invalid.files[1].content_hash = Some("a".repeat(64));
+        write_manifest(&repository, &invalid).expect("manifest should be written");
+
+        let error = restore_snapshot(&repository, "snap_restore", &target)
+            .expect_err("hash mismatch should fail");
+
+        assert!(matches!(error, RestoreError::HashMismatch { .. }));
+        assert!(!target.join("source/file.txt").exists());
+        let source = target.join("source");
+        if source.exists() {
+            assert!(
+                std::fs::read_dir(source)
+                    .expect("source directory should be readable")
+                    .next()
+                    .is_none()
+            );
+        }
     }
 
     #[test]
