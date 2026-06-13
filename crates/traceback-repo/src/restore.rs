@@ -5,6 +5,7 @@ use std::{
 };
 
 use thiserror::Error;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::{
@@ -121,9 +122,10 @@ fn restore_manifest(
         bytes: 0,
     };
 
-    for entry in entries {
+    for entry in &entries {
         restore_entry(repository, &root, entry, &mut summary)?;
     }
+    restore_directory_metadata(&root, entries.iter().copied())?;
 
     Ok(summary)
 }
@@ -232,6 +234,32 @@ fn restore_directory_selection(
             .to_owned();
         restore_entry(repository, root, &rebased, &mut summary)?;
     }
+    let mut directories = entries
+        .iter()
+        .filter(|entry| entry.file_type == FileType::Directory)
+        .map(|entry| {
+            let mut rebased = (*entry).clone();
+            rebased.path = if entry.path == selected_path {
+                ".".to_owned()
+            } else {
+                entry
+                    .path
+                    .strip_prefix(&format!("{selected_path}/"))
+                    .expect("entry was filtered by selected prefix")
+                    .to_owned()
+            };
+            rebased
+        })
+        .collect::<Vec<_>>();
+    directories.sort_by_key(|entry| std::cmp::Reverse(entry.path.matches('/').count()));
+    for entry in directories {
+        let output = if entry.path == "." {
+            root.to_owned()
+        } else {
+            contained_output_path(root, &entry.path)?
+        };
+        apply_metadata(&output, &entry)?;
+    }
 
     Ok(summary)
 }
@@ -276,6 +304,7 @@ fn restore_entry(
             let parent = output.parent().expect("output path has parent");
             fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
             restore_file_streaming(repository, &output, entry)?;
+            apply_metadata(&output, entry)?;
             summary.files += 1;
             summary.bytes = summary
                 .bytes
@@ -300,6 +329,47 @@ fn restore_entry(
         }
     }
 
+    Ok(())
+}
+
+fn restore_directory_metadata<'a>(
+    root: &Path,
+    entries: impl Iterator<Item = &'a FileEntry>,
+) -> Result<(), RestoreError> {
+    let mut directories = entries
+        .filter(|entry| entry.file_type == FileType::Directory)
+        .collect::<Vec<_>>();
+    directories.sort_by_key(|entry| std::cmp::Reverse(entry.path.matches('/').count()));
+    for entry in directories {
+        apply_metadata(&contained_output_path(root, &entry.path)?, entry)?;
+    }
+    Ok(())
+}
+
+fn apply_metadata(path: &Path, entry: &FileEntry) -> Result<(), RestoreError> {
+    if let Some(modified_at) = &entry.modified_at {
+        let timestamp = OffsetDateTime::parse(modified_at, &Rfc3339)
+            .expect("validated manifest timestamps are valid");
+        let modified =
+            filetime::FileTime::from_unix_time(timestamp.unix_timestamp(), timestamp.nanosecond());
+        filetime::set_file_mtime(path, modified).map_err(|source| io_error(path, source))?;
+    }
+    apply_permissions(path, entry.permissions)
+}
+
+#[cfg(unix)]
+fn apply_permissions(path: &Path, mode: Option<u32>) -> Result<(), RestoreError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(mode) = mode {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .map_err(|source| io_error(path, source))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn apply_permissions(_path: &Path, _mode: Option<u32>) -> Result<(), RestoreError> {
     Ok(())
 }
 
@@ -476,6 +546,34 @@ mod tests {
                 .expect("restored file should be readable"),
             "hello"
         );
+    }
+
+    #[test]
+    fn restores_file_and_directory_timestamps() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let target = temporary.path().join("restore");
+        init_repository(&repository).expect("repository should initialize");
+        let StoreChunkOutcome::Stored(chunk) =
+            store_chunk(&repository, b"hello").expect("chunk should be stored")
+        else {
+            panic!("chunk should be newly stored");
+        };
+        let mut snapshot = manifest("snap_metadata", &chunk.hash);
+        snapshot.files[0].modified_at = Some("2020-01-02T03:04:05Z".to_owned());
+        snapshot.files[1].modified_at = Some("2021-02-03T04:05:06Z".to_owned());
+        write_manifest(&repository, &snapshot).expect("manifest should be written");
+
+        restore_snapshot(&repository, "snap_metadata", &target).expect("restore should work");
+
+        let directory_time = filetime::FileTime::from_last_modification_time(
+            &std::fs::metadata(target.join("source")).expect("directory metadata should exist"),
+        );
+        let file_time = filetime::FileTime::from_last_modification_time(
+            &std::fs::metadata(target.join("source/file.txt")).expect("file metadata should exist"),
+        );
+        assert_eq!(directory_time.unix_seconds(), 1_577_934_245);
+        assert_eq!(file_time.unix_seconds(), 1_612_325_106);
     }
 
     #[test]
@@ -667,6 +765,7 @@ mod tests {
                     file_type: FileType::Directory,
                     size: 0,
                     modified_at: None,
+                    permissions: None,
                     content_hash: None,
                     chunks: Vec::new(),
                     symlink_target: None,
@@ -676,6 +775,7 @@ mod tests {
                     file_type: FileType::File,
                     size: 5,
                     modified_at: None,
+                    permissions: None,
                     content_hash: Some(blake3::hash(b"hello").to_hex().to_string()),
                     chunks: vec![chunk_hash.to_owned()],
                     symlink_target: None,

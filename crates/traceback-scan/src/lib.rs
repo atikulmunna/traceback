@@ -66,6 +66,7 @@ pub struct ScannedEntry {
     pub file_type: ScannedFileType,
     pub size: u64,
     pub modified_at: Option<String>,
+    pub permissions: Option<u32>,
     pub symlink_target: Option<PathBuf>,
 }
 
@@ -158,6 +159,7 @@ fn scan_path(
             file_type: ScannedFileType::Directory,
             size: 0,
             modified_at: modified_at(&metadata),
+            permissions: permissions(&metadata),
             symlink_target: None,
         });
         scan_directory_children(source, path, ignore_set, changing_file_policy, inventory)?;
@@ -170,6 +172,7 @@ fn scan_path(
                 file_type: ScannedFileType::Symlink,
                 size: 0,
                 modified_at: modified_at(&metadata),
+                permissions: permissions(&metadata),
                 symlink_target: Some(target),
             }),
             Err(source) => inventory.warnings.push(ScanWarning::Unreadable {
@@ -186,6 +189,7 @@ fn scan_path(
             file_type: ScannedFileType::File,
             size: metadata.len(),
             modified_at: modified_at(&metadata),
+            permissions: permissions(&metadata),
             symlink_target: None,
         });
     } else {
@@ -332,6 +336,18 @@ fn modified_at(metadata: &fs::Metadata) -> Option<String> {
 
 fn modified(metadata: &fs::Metadata) -> Option<SystemTime> {
     metadata.modified().ok()
+}
+
+#[cfg(unix)]
+fn permissions(metadata: &fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+
+    Some(metadata.permissions().mode())
+}
+
+#[cfg(not(unix))]
+fn permissions(_metadata: &fs::Metadata) -> Option<u32> {
+    None
 }
 
 fn io_error(path: &Path, source: io::Error) -> ScanError {

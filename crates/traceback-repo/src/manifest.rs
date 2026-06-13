@@ -65,6 +65,8 @@ pub struct FileEntry {
     pub file_type: FileType,
     pub size: u64,
     pub modified_at: Option<String>,
+    #[serde(default)]
+    pub permissions: Option<u32>,
     pub content_hash: Option<String>,
     #[serde(default)]
     pub chunks: Vec<String>,
@@ -405,6 +407,27 @@ mod tests {
     }
 
     #[test]
+    fn reads_older_manifest_without_permissions_field() {
+        let json = serde_json::to_string(&manifest()).expect("manifest should serialize");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("manifest JSON should parse");
+        let mut value = value;
+        for file in value["files"]
+            .as_array_mut()
+            .expect("files should be an array")
+        {
+            file.as_object_mut()
+                .expect("file should be an object")
+                .remove("permissions");
+        }
+
+        let parsed: SnapshotManifest =
+            serde_json::from_value(value).expect("older manifest should deserialize");
+
+        assert!(parsed.files.iter().all(|file| file.permissions.is_none()));
+    }
+
+    #[test]
     fn write_manifest_refuses_to_overwrite_published_snapshot() {
         let repository = tempdir().expect("temporary repository should be created");
         init_repository(repository.path()).expect("repository should initialize");
@@ -584,6 +607,7 @@ mod tests {
                     file_type: FileType::File,
                     size: 123,
                     modified_at: Some("2026-06-02T00:00:00Z".to_owned()),
+                    permissions: None,
                     content_hash: Some(hash.clone()),
                     chunks: vec![hash],
                     symlink_target: None,
@@ -593,6 +617,7 @@ mod tests {
                     file_type: FileType::Directory,
                     size: 0,
                     modified_at: None,
+                    permissions: None,
                     content_hash: None,
                     chunks: Vec::new(),
                     symlink_target: None,
@@ -602,6 +627,7 @@ mod tests {
                     file_type: FileType::Symlink,
                     size: 0,
                     modified_at: None,
+                    permissions: None,
                     content_hash: None,
                     chunks: Vec::new(),
                     symlink_target: Some("file.txt".to_owned()),

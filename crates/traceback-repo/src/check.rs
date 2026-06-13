@@ -385,6 +385,7 @@ mod tests {
                 file_type: FileType::File,
                 size: 5,
                 modified_at: None,
+                permissions: None,
                 content_hash: Some(blake3::hash(b"hello").to_hex().to_string()),
                 chunks: vec![chunk_hash.to_owned()],
                 symlink_target: None,

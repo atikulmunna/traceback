@@ -509,6 +509,7 @@ fn build_file_entry(
                 file_type: FileType::Directory,
                 size: 0,
                 modified_at: entry.modified_at.clone(),
+                permissions: entry.permissions,
                 content_hash: None,
                 chunks: Vec::new(),
                 symlink_target: None,
@@ -522,6 +523,7 @@ fn build_file_entry(
                 file_type: FileType::Symlink,
                 size: 0,
                 modified_at: entry.modified_at.clone(),
+                permissions: entry.permissions,
                 content_hash: None,
                 chunks: Vec::new(),
                 symlink_target: entry
@@ -556,6 +558,7 @@ fn stream_file_entry(
                     file_type: FileType::File,
                     size: streamed.size,
                     modified_at: metadata_modified_at(&after),
+                    permissions: metadata_permissions(&after),
                     content_hash: Some(streamed.content_hash),
                     chunks: streamed.chunks,
                     symlink_target: None,
@@ -636,6 +639,18 @@ fn metadata_modified_at(metadata: &fs::Metadata) -> Option<String> {
         .ok()?
         .format(&Rfc3339)
         .ok()
+}
+
+#[cfg(unix)]
+fn metadata_permissions(metadata: &fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+
+    Some(metadata.permissions().mode())
+}
+
+#[cfg(not(unix))]
+fn metadata_permissions(_metadata: &fs::Metadata) -> Option<u32> {
+    None
 }
 
 #[cfg(not(test))]
@@ -816,6 +831,7 @@ mod tests {
             file_type: ScannedFileType::File,
             size: 6,
             modified_at: None,
+            permissions: None,
             symlink_target: None,
         };
 

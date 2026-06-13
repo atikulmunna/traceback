@@ -29,7 +29,7 @@ recover
 diff
 ```
 
-Repository initialization, verified local chunk storage, staged snapshot manifest publication, metadata-only filesystem scanning, streaming backup and restore, writer locking, interrupted-write recovery, snapshot listing, full and selected-path restore, restore rehearsal, repository integrity checks, and snapshot diffs are implemented.
+Repository initialization, verified local chunk storage, staged snapshot manifest publication, metadata-only filesystem scanning, streaming backup and restore, writer locking, interrupted-write recovery, snapshot listing, full and selected-path restore, timestamp restoration, Unix permission preservation, restore rehearsal, repository integrity checks, and snapshot diffs are implemented.
 
 `snapshots`, `check`, and `diff` support machine-readable output with the global
 `--json` flag:
