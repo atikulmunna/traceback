@@ -53,6 +53,51 @@ fn restore_reconstructs_backed_up_files() {
 }
 
 #[test]
+fn restore_round_trips_unicode_paths() {
+    let temporary = tempdir().expect("temporary directory should be created");
+    let repository = temporary.path().join("repo");
+    let source = temporary.path().join("source");
+    let target = temporary.path().join("restored");
+    let relative = std::path::Path::new("নোট").join("東京.txt");
+    fs::create_dir_all(source.join("নোট")).expect("source directory should be created");
+    fs::write(source.join(&relative), "hello").expect("source file should be written");
+    assert!(
+        traceback()
+            .arg("init")
+            .arg(&repository)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let backup = traceback()
+        .arg("backup")
+        .arg(&source)
+        .arg("--repo")
+        .arg(&repository)
+        .output()
+        .expect("backup should execute");
+    assert!(backup.status.success());
+    let snapshot_id = snapshot_id_from_output(&String::from_utf8_lossy(&backup.stdout));
+
+    let restore = traceback()
+        .arg("restore")
+        .arg(&snapshot_id)
+        .arg("--repo")
+        .arg(&repository)
+        .arg("--target")
+        .arg(&target)
+        .output()
+        .expect("restore should execute");
+
+    assert!(restore.status.success());
+    assert_eq!(
+        fs::read_to_string(target.join("source").join(relative))
+            .expect("restored Unicode file should be readable"),
+        "hello"
+    );
+}
+
+#[test]
 fn restore_refuses_to_overwrite_existing_files() {
     let temporary = tempdir().expect("temporary directory should be created");
     let repository = temporary.path().join("repo");

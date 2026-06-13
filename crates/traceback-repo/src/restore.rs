@@ -25,6 +25,8 @@ pub enum RestoreError {
     PathNotFound(String),
     #[error("restore target already exists: {0}")]
     TargetExists(PathBuf),
+    #[error("restore path crosses a filesystem symlink: {0}")]
+    SymlinkTraversal(PathBuf),
     #[error("restored file hash mismatch for {path}: expected {expected}, found {actual}")]
     HashMismatch {
         path: PathBuf,
@@ -98,6 +100,7 @@ fn restore_manifest(
     verify_manifest_chunks(repository, manifest)?;
 
     let root = absolute_target(target)?;
+    reject_symlink(&root)?;
     if root.exists() && !root.is_dir() {
         return Err(RestoreError::TargetExists(root));
     }
@@ -207,6 +210,7 @@ fn restore_directory_selection(
     selected_path: &str,
     entries: &[&FileEntry],
 ) -> Result<RestoreSummary, RestoreError> {
+    reject_symlink(root)?;
     if root.exists() && !root.is_dir() {
         return Err(RestoreError::TargetExists(root.to_owned()));
     }
@@ -289,6 +293,8 @@ fn restore_entry(
     summary: &mut RestoreSummary,
 ) -> Result<(), RestoreError> {
     let output = contained_output_path(root, &entry.path)?;
+    ensure_no_symlink_ancestors(root, &output)?;
+    reject_symlink(&output)?;
     match entry.file_type {
         FileType::Directory => {
             if output.exists() && !output.is_dir() {
@@ -453,6 +459,33 @@ fn contained_output_path(root: &Path, manifest_path: &str) -> Result<PathBuf, Re
         return Err(RestoreError::PathEscapesTarget(manifest_path.to_owned()));
     }
     Ok(output)
+}
+
+fn reject_symlink(path: &Path) -> Result<(), RestoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(RestoreError::SymlinkTraversal(path.to_owned()))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(io_error(path, source)),
+    }
+}
+
+fn ensure_no_symlink_ancestors(root: &Path, output: &Path) -> Result<(), RestoreError> {
+    reject_symlink(root)?;
+    let relative = output
+        .strip_prefix(root)
+        .map_err(|_| RestoreError::PathEscapesTarget(output.display().to_string()))?;
+    let mut current = root.to_owned();
+    for component in relative
+        .components()
+        .take(relative.components().count().saturating_sub(1))
+    {
+        current.push(component);
+        reject_symlink(&current)?;
+    }
+    Ok(())
 }
 
 fn lexical_relative_path(path: &str) -> Result<PathBuf, RestoreError> {
@@ -672,6 +705,65 @@ mod tests {
     }
 
     #[test]
+    fn rejects_symlink_target_that_escapes_restore_directory() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let target = temporary.path().join("restore");
+        init_repository(&repository).expect("repository should initialize");
+        let mut snapshot = manifest("snap_symlink_escape", &"a".repeat(64));
+        snapshot.files.clear();
+        snapshot.files.push(FileEntry {
+            path: "source/link".to_owned(),
+            file_type: FileType::Symlink,
+            size: 0,
+            modified_at: None,
+            permissions: None,
+            content_hash: None,
+            chunks: Vec::new(),
+            symlink_target: Some("../outside".to_owned()),
+        });
+        snapshot.summary.file_count = 0;
+        snapshot.summary.logical_bytes = 0;
+        write_manifest(&repository, &snapshot).expect("manifest should be written");
+
+        let error = restore_snapshot(&repository, "snap_symlink_escape", &target)
+            .expect_err("escaping symlink should be rejected");
+
+        assert!(matches!(
+            error,
+            RestoreError::UnsupportedSymlinkTarget { .. }
+        ));
+        assert!(!target.join("source/link").exists());
+    }
+
+    #[test]
+    fn refuses_to_write_through_existing_directory_symlink() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let target = temporary.path().join("restore");
+        let outside = temporary.path().join("outside");
+        init_repository(&repository).expect("repository should initialize");
+        std::fs::create_dir_all(&target).expect("target should be created");
+        std::fs::create_dir_all(&outside).expect("outside should be created");
+        if !create_directory_symlink(&outside, &target.join("source")) {
+            return;
+        }
+        let StoreChunkOutcome::Stored(chunk) =
+            store_chunk(&repository, b"hello").expect("chunk should be stored")
+        else {
+            panic!("chunk should be newly stored");
+        };
+        write_manifest(&repository, &manifest("snap_parent_symlink", &chunk.hash))
+            .expect("manifest should be written");
+
+        let error = restore_snapshot(&repository, "snap_parent_symlink", &target)
+            .expect_err("filesystem symlink should be rejected");
+
+        assert!(matches!(error, RestoreError::SymlinkTraversal(_)));
+        assert!(!outside.join("file.txt").exists());
+    }
+
+    #[test]
     fn fails_when_required_chunk_is_missing() {
         let temporary = tempdir().expect("temporary directory should be created");
         let repository = temporary.path().join("repo");
@@ -787,5 +879,15 @@ mod tests {
                 newly_stored_bytes: 0,
             },
         }
+    }
+
+    #[cfg(unix)]
+    fn create_directory_symlink(target: &std::path::Path, link: &std::path::Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn create_directory_symlink(target: &std::path::Path, link: &std::path::Path) -> bool {
+        std::os::windows::fs::symlink_dir(target, link).is_ok()
     }
 }

@@ -288,6 +288,7 @@ pub fn error_code(error: &(dyn Error + 'static)) -> &'static str {
             RestoreError::PathNotFound(_) => "restore_path_not_found",
             RestoreError::TargetExists(_) => "restore_target_exists",
             RestoreError::PathEscapesTarget(_) => "restore_path_unsafe",
+            RestoreError::SymlinkTraversal(_) => "restore_symlink_traversal",
             RestoreError::UnsupportedSymlinkTarget { .. } => "restore_symlink_unsafe",
             RestoreError::HashMismatch { .. } | RestoreError::SizeMismatch { .. } => {
                 "restore_verification_failed"

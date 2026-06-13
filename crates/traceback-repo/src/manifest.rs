@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -7,6 +8,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::{ChunkError, read_chunk};
@@ -28,6 +30,8 @@ pub enum ManifestError {
     MissingSources,
     #[error("manifest path is invalid: {0}")]
     InvalidPath(String),
+    #[error("manifest paths collide on a portable filesystem: {first} and {second}")]
+    PathCollision { first: String, second: String },
     #[error("chunk hash is invalid: {0}")]
     InvalidChunkHash(String),
     #[error("file entry is invalid for {path}: {reason}")]
@@ -104,10 +108,18 @@ pub fn validate_manifest(manifest: &SnapshotManifest) -> Result<(), ManifestErro
         validate_portable_path(source)?;
     }
 
+    let mut paths = HashMap::new();
     let mut file_count = 0_u64;
     let mut logical_bytes = 0_u64;
     for file in &manifest.files {
         validate_file_entry(file)?;
+        let collision_key = file.path.nfc().collect::<String>().to_lowercase();
+        if let Some(first) = paths.insert(collision_key, file.path.clone()) {
+            return Err(ManifestError::PathCollision {
+                first,
+                second: file.path.clone(),
+            });
+        }
         if file.file_type == FileType::File {
             file_count += 1;
             logical_bytes = logical_bytes.checked_add(file.size).ok_or_else(|| {
@@ -340,12 +352,46 @@ fn validate_portable_path(path: &str) -> Result<(), ManifestError> {
     }
 
     for segment in path.split('/') {
-        if segment.is_empty() || segment == "." || segment == ".." {
+        if segment.is_empty()
+            || segment == "."
+            || segment == ".."
+            || segment.ends_with(['.', ' '])
+            || is_windows_reserved_name(segment)
+        {
             return Err(ManifestError::InvalidPath(path.to_owned()));
         }
     }
 
     Ok(())
+}
+
+fn is_windows_reserved_name(segment: &str) -> bool {
+    let stem = segment.split('.').next().unwrap_or(segment);
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 fn validate_chunk_hash(hash: &str) -> Result<(), ManifestError> {
@@ -497,6 +543,61 @@ mod tests {
     #[test]
     fn rejects_absolute_and_parent_paths() {
         for path in ["/absolute", "a/../b", "C:/drive", "a\\b", "a//b"] {
+            let mut manifest = manifest();
+            manifest.files[0].path = path.to_owned();
+
+            let error = validate_manifest(&manifest).expect_err("path should be rejected");
+
+            assert!(matches!(error, ManifestError::InvalidPath(_)));
+        }
+    }
+
+    #[test]
+    fn accepts_unicode_and_long_portable_paths() {
+        let mut manifest = manifest();
+        manifest.files[0].path = format!("source/নোট-東京-{}/file.txt", "a".repeat(180));
+
+        validate_manifest(&manifest).expect("portable Unicode path should be valid");
+    }
+
+    #[test]
+    fn rejects_case_insensitive_path_collisions() {
+        let mut manifest = manifest();
+        let mut collision = manifest.files[0].clone();
+        collision.path = "SOURCE/FILE.TXT".to_owned();
+        manifest.files.push(collision);
+        manifest.summary.file_count += 1;
+        manifest.summary.logical_bytes += 123;
+
+        let error = validate_manifest(&manifest).expect_err("collision should be rejected");
+
+        assert!(matches!(error, ManifestError::PathCollision { .. }));
+    }
+
+    #[test]
+    fn rejects_unicode_normalization_collisions() {
+        let mut manifest = manifest();
+        manifest.files[0].path = "source/café.txt".to_owned();
+        let mut collision = manifest.files[0].clone();
+        collision.path = "source/cafe\u{301}.txt".to_owned();
+        manifest.files.push(collision);
+        manifest.summary.file_count += 1;
+        manifest.summary.logical_bytes += 123;
+
+        let error =
+            validate_manifest(&manifest).expect_err("normalization collision should be rejected");
+
+        assert!(matches!(error, ManifestError::PathCollision { .. }));
+    }
+
+    #[test]
+    fn rejects_windows_reserved_names_and_trailing_characters() {
+        for path in [
+            "source/CON",
+            "source/nul.txt",
+            "source/note.",
+            "source/note ",
+        ] {
             let mut manifest = manifest();
             manifest.files[0].path = path.to_owned();
 
