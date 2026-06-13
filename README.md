@@ -30,6 +30,15 @@ diff
 
 Repository initialization, verified local chunk storage, staged snapshot manifest publication, filesystem scanning, backup creation with writer locking, snapshot listing, full and selected-path restore, restore rehearsal, repository integrity checks, and snapshot diffs are implemented.
 
+`snapshots`, `check`, and `diff` support machine-readable output with the global
+`--json` flag:
+
+```text
+traceback --json snapshots --repo ./my-backups
+traceback check --repo ./my-backups --json
+traceback --json diff snap_old snap_new --repo ./my-backups
+```
+
 ## Development Approach
 
 The project is built in small, tested increments. The first milestone is a local vertical slice:

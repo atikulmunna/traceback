@@ -43,6 +43,35 @@ fn check_reports_missing_chunk() {
 }
 
 #[test]
+fn check_supports_json_output_for_failure() {
+    let (repository, _source, _temporary) = repository_with_backup();
+    remove_first_chunk_file(&repository);
+
+    let output = traceback()
+        .arg("check")
+        .arg("--repo")
+        .arg(&repository)
+        .arg("--json")
+        .output()
+        .expect("check should execute");
+
+    assert!(!output.status.success());
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("output should be valid JSON");
+    assert_eq!(json["passed"], false);
+    assert_eq!(json["manifests_checked"], 1);
+    assert_eq!(json["chunks_verified"], 0);
+    assert_eq!(json["orphaned_chunks"], 0);
+    assert_eq!(json["staging_leftovers"], 0);
+    assert!(
+        json["issues"][0]
+            .as_str()
+            .expect("issue should be a string")
+            .contains("referenced chunk is missing or corrupt")
+    );
+}
+
+#[test]
 fn check_reports_corrupted_chunk() {
     let (repository, _source, _temporary) = repository_with_backup();
     corrupt_first_chunk_file(&repository);

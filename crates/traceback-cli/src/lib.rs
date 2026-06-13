@@ -1,6 +1,7 @@
 use std::{error::Error, fs, path::PathBuf};
 
 use clap::{Parser, Subcommand};
+use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
     CheckIssue, FileEntry, FileType, InitOutcome, ManifestSummary, SnapshotDiff, SnapshotManifest,
@@ -16,6 +17,10 @@ use uuid::Uuid;
 #[command(about = "Explainable backup and restore tool")]
 #[command(version)]
 pub struct Cli {
+    /// Emit machine-readable JSON for supported commands.
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -86,6 +91,7 @@ pub enum Command {
 }
 
 pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
+    let json = cli.json;
     match cli.command {
         Command::Init { repo } => match init_repository(&repo)? {
             InitOutcome::Created(config) => {
@@ -116,7 +122,10 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         Command::Snapshots { repo } => {
             validate_repository(&repo)?;
             let manifests = list_manifests(&repo)?;
-            if manifests.is_empty() {
+            if json {
+                let snapshots = manifests.iter().map(SnapshotJson::from).collect::<Vec<_>>();
+                print_json(&SnapshotsJson { snapshots })?;
+            } else if manifests.is_empty() {
                 println!("No snapshots found.");
             } else {
                 println!(
@@ -167,28 +176,117 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         }
         Command::Check { repo } => {
             let report = check_repository(&repo);
-            println!("Repository check completed.");
-            println!("Manifests checked:    {}", report.manifests_checked);
-            println!("Chunks verified:      {}", report.chunks_verified);
-            println!("Orphaned chunks:      {}", report.orphaned_chunks);
-            println!("Staging leftovers:    {}", report.abandoned_staging_entries);
-            if report.passed() {
-                println!("Result:               PASS");
+            let passed = report.passed();
+            if json {
+                let issues = report
+                    .issues
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                print_json(&CheckJson {
+                    passed,
+                    manifests_checked: report.manifests_checked,
+                    chunks_verified: report.chunks_verified,
+                    orphaned_chunks: report.orphaned_chunks,
+                    staging_leftovers: report.abandoned_staging_entries,
+                    issues,
+                })?;
             } else {
-                println!("Result:               FAIL");
-                for issue in &report.issues {
-                    println!("Issue:                {}", display_check_issue(issue));
+                println!("Repository check completed.");
+                println!("Manifests checked:    {}", report.manifests_checked);
+                println!("Chunks verified:      {}", report.chunks_verified);
+                println!("Orphaned chunks:      {}", report.orphaned_chunks);
+                println!("Staging leftovers:    {}", report.abandoned_staging_entries);
+                if passed {
+                    println!("Result:               PASS");
+                } else {
+                    println!("Result:               FAIL");
+                    for issue in &report.issues {
+                        println!("Issue:                {}", display_check_issue(issue));
+                    }
                 }
+            }
+            if !passed {
                 return Err("repository check failed".into());
             }
         }
         Command::Diff { old, new, repo } => {
             validate_repository(&repo)?;
             let diff = diff_snapshots(&repo, &old, &new)?;
-            print_snapshot_diff(&diff);
+            if json {
+                print_json(&DiffJson::from(&diff))?;
+            } else {
+                print_snapshot_diff(&diff);
+            }
         }
     }
 
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct SnapshotsJson {
+    snapshots: Vec<SnapshotJson>,
+}
+
+#[derive(Serialize)]
+struct SnapshotJson {
+    id: String,
+    created_at: String,
+    sources: Vec<String>,
+    file_count: u64,
+    logical_bytes: u64,
+    newly_stored_bytes: u64,
+}
+
+impl From<&SnapshotManifest> for SnapshotJson {
+    fn from(manifest: &SnapshotManifest) -> Self {
+        Self {
+            id: manifest.snapshot_id.clone(),
+            created_at: manifest.created_at.clone(),
+            sources: manifest.sources.clone(),
+            file_count: manifest.summary.file_count,
+            logical_bytes: manifest.summary.logical_bytes,
+            newly_stored_bytes: manifest.summary.newly_stored_bytes,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CheckJson {
+    passed: bool,
+    manifests_checked: usize,
+    chunks_verified: usize,
+    orphaned_chunks: usize,
+    staging_leftovers: usize,
+    issues: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct DiffJson {
+    old_snapshot_id: String,
+    new_snapshot_id: String,
+    added: Vec<String>,
+    removed: Vec<String>,
+    modified: Vec<String>,
+    unchanged: usize,
+}
+
+impl From<&SnapshotDiff> for DiffJson {
+    fn from(diff: &SnapshotDiff) -> Self {
+        Self {
+            old_snapshot_id: diff.old_snapshot_id.clone(),
+            new_snapshot_id: diff.new_snapshot_id.clone(),
+            added: diff.added.clone(),
+            removed: diff.removed.clone(),
+            modified: diff.modified.clone(),
+            unchanged: diff.unchanged,
+        }
+    }
+}
+
+fn print_json(value: &impl Serialize) -> Result<(), serde_json::Error> {
+    println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
 

@@ -83,6 +83,47 @@ fn diff_reports_no_changes_for_identical_snapshots() {
     assert!(stdout.contains("No path changes found."));
 }
 
+#[test]
+fn diff_supports_json_output() {
+    let temporary = tempdir().expect("temporary directory should be created");
+    let repository = temporary.path().join("repo");
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).expect("source should be created");
+    fs::write(source.join("note.txt"), "old").expect("source file should be written");
+    assert!(
+        traceback()
+            .arg("init")
+            .arg(&repository)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let old_snapshot = backup_snapshot_id(&source, &repository);
+    fs::write(source.join("note.txt"), "new").expect("source file should change");
+    fs::write(source.join("added.txt"), "added").expect("added file should be written");
+    let new_snapshot = backup_snapshot_id(&source, &repository);
+
+    let output = traceback()
+        .arg("--json")
+        .arg("diff")
+        .arg(&old_snapshot)
+        .arg(&new_snapshot)
+        .arg("--repo")
+        .arg(&repository)
+        .output()
+        .expect("diff should execute");
+
+    assert!(output.status.success());
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("output should be valid JSON");
+    assert_eq!(json["old_snapshot_id"], old_snapshot);
+    assert_eq!(json["new_snapshot_id"], new_snapshot);
+    assert_eq!(json["added"][0], "source/added.txt");
+    assert_eq!(json["modified"][0], "source/note.txt");
+    assert_eq!(json["removed"].as_array().unwrap().len(), 0);
+    assert_eq!(json["unchanged"], 0);
+}
+
 fn backup_snapshot_id(source: &std::path::Path, repository: &std::path::Path) -> String {
     let output = traceback()
         .arg("backup")
