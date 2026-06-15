@@ -29,11 +29,12 @@ recover
 diff
 explain
 blame-size
+doctor
 ```
 
-Repository initialization, verified local chunk storage, staged snapshot manifest publication, metadata-only filesystem scanning, streaming backup and restore, writer locking, interrupted-write recovery, snapshot listing, full and selected-path restore, timestamp restoration, Unix permission preservation, portable path collision checks, symlink-safe restore containment, restore rehearsal, repository integrity checks with persisted check/rehearsal history, rich snapshot diffs, backup explanations, repository-wide chunk reference accounting, and file/directory storage blame are implemented.
+Repository initialization, verified local chunk storage, staged snapshot manifest publication, metadata-only filesystem scanning, streaming backup and restore, writer locking, interrupted-write recovery, snapshot listing, full and selected-path restore, timestamp restoration, Unix permission preservation, portable path collision checks, symlink-safe restore containment, restore rehearsal, repository integrity checks with persisted check/rehearsal history, repository doctor findings, rich snapshot diffs, backup explanations, repository-wide chunk reference accounting, and file/directory storage blame are implemented.
 
-`snapshots`, `check`, `diff`, `explain`, and `blame-size` support machine-readable output with the global
+`snapshots`, `check`, `diff`, `explain`, `blame-size`, and `doctor` support machine-readable output with the global
 `--json` flag:
 
 ```text
@@ -42,6 +43,7 @@ traceback check --repo ./my-backups --json
 traceback --json diff snap_old snap_new --repo ./my-backups
 traceback --json explain latest --repo ./my-backups
 traceback --json blame-size latest --repo ./my-backups
+traceback --json doctor --repo ./my-backups
 ```
 
 ## Development Approach

@@ -4,13 +4,14 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
-    BlameError, CheckIssue, ChunkError, DiffEntry, DiffError, ExplainError, ExplainReport,
-    FileEntry, FileType, HistoryError, InitOutcome, ManifestError, ManifestSummary, OperationKind,
-    RecoveryError, RepositoryError, RestoreError, SnapshotDiff, SnapshotManifest,
-    StorageBlameEntry, StorageBlameReport, StoreChunkOutcome, acquire_writer_lock,
-    append_operation, blame_snapshot, check_repository, diff_snapshots, explain_snapshot,
-    init_repository, list_manifests, recover_interrupted_writes, rehearse_restore,
-    restore_snapshot, restore_snapshot_path, store_chunk, validate_repository, write_manifest,
+    BlameError, CheckIssue, ChunkError, DiffEntry, DiffError, DoctorError, DoctorReport,
+    ExplainError, ExplainReport, FileEntry, FileType, FindingLevel, HistoryError, InitOutcome,
+    ManifestError, ManifestSummary, OperationKind, RecoveryError, RepositoryError, RestoreError,
+    SnapshotDiff, SnapshotManifest, StorageBlameEntry, StorageBlameReport, StoreChunkOutcome,
+    acquire_writer_lock, append_operation, blame_snapshot, check_repository, diff_snapshots,
+    doctor_repository, explain_snapshot, init_repository, list_manifests,
+    recover_interrupted_writes, rehearse_restore, restore_snapshot, restore_snapshot_path,
+    store_chunk, validate_repository, write_manifest,
 };
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
 use uuid::Uuid;
@@ -111,6 +112,12 @@ pub enum Command {
         /// Snapshot ID or "latest".
         snapshot: String,
 
+        /// Backup repository directory.
+        #[arg(long)]
+        repo: PathBuf,
+    },
+    /// Inspect repository reliability evidence and recommend actions.
+    Doctor {
         /// Backup repository directory.
         #[arg(long)]
         repo: PathBuf,
@@ -323,6 +330,15 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 print_blame_report(&report);
             }
         }
+        Command::Doctor { repo } => {
+            validate_repository(&repo)?;
+            let report = doctor_repository(&repo)?;
+            if json {
+                print_json(&report)?;
+            } else {
+                print_doctor_report(&report);
+            }
+        }
     }
 
     Ok(())
@@ -392,6 +408,9 @@ pub fn error_code(error: &(dyn Error + 'static)) -> &'static str {
     }
     if error.downcast_ref::<HistoryError>().is_some() {
         return "history_error";
+    }
+    if error.downcast_ref::<DoctorError>().is_some() {
+        return "doctor_failed";
     }
     if let Some(error) = error.downcast_ref::<RecoveryError>() {
         return match error {
@@ -1023,6 +1042,33 @@ fn print_blame_report(report: &StorageBlameReport) {
             entry.shared_stored_bytes,
             entry.reclaimable_stored_bytes
         );
+    }
+}
+
+fn print_doctor_report(report: &DoctorReport) {
+    println!("Repository doctor completed.");
+    println!(
+        "Latest snapshot:      {}",
+        report.latest_snapshot_id.as_deref().unwrap_or("none")
+    );
+    println!(
+        "Current integrity:    {}",
+        if report.integrity_passed {
+            "PASS"
+        } else {
+            "FAIL"
+        }
+    );
+    for finding in &report.findings {
+        let label = match finding.level {
+            FindingLevel::Good => "GOOD",
+            FindingLevel::Warning => "WARN",
+            FindingLevel::Critical => "CRITICAL",
+        };
+        println!("[{label}] {}: {}", finding.code, finding.message);
+        if let Some(recommendation) = &finding.recommendation {
+            println!("  Action: {recommendation}");
+        }
     }
 }
 
