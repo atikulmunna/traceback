@@ -5,13 +5,13 @@ use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
     BlameError, CheckIssue, ChunkError, DiffEntry, DiffError, DoctorError, DoctorReport,
-    ExplainError, ExplainReport, FileEntry, FileType, FindingLevel, HistoryError, InitOutcome,
-    ManifestError, ManifestSummary, OperationKind, RecoveryError, RepositoryError, RestoreError,
-    SnapshotDiff, SnapshotManifest, StorageBlameEntry, StorageBlameReport, StoreChunkOutcome,
-    acquire_writer_lock, append_operation, blame_snapshot, check_repository, diff_snapshots,
-    doctor_repository, explain_snapshot, init_repository, list_manifests,
+    ExplainError, ExplainReport, FileEntry, FileType, FindingLevel, HistoryError, IgnoreError,
+    InitOutcome, ManifestError, ManifestSummary, OperationKind, RecoveryError, RepositoryError,
+    RestoreError, SnapshotDiff, SnapshotManifest, StorageBlameEntry, StorageBlameReport,
+    StoreChunkOutcome, acquire_writer_lock, append_operation, blame_snapshot, check_repository,
+    diff_snapshots, doctor_repository, explain_snapshot, init_repository, list_manifests,
     recover_interrupted_writes, rehearse_restore, restore_snapshot, restore_snapshot_path,
-    store_chunk, validate_repository, write_manifest,
+    store_chunk, suggest_ignores, validate_repository, write_manifest,
 };
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
 use uuid::Uuid;
@@ -121,6 +121,20 @@ pub enum Command {
         /// Backup repository directory.
         #[arg(long)]
         repo: PathBuf,
+    },
+    /// Suggest or apply source ignore rules.
+    Ignore {
+        #[command(subcommand)]
+        command: IgnoreCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum IgnoreCommand {
+    /// Suggest likely dependency, build, cache, temporary, and generated paths.
+    Suggest {
+        /// Source tree to inspect.
+        path: PathBuf,
     },
 }
 
@@ -339,6 +353,28 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 print_doctor_report(&report);
             }
         }
+        Command::Ignore {
+            command: IgnoreCommand::Suggest { path },
+        } => {
+            let suggestions = suggest_ignores(&path)?;
+            if json {
+                print_json(&suggestions)?;
+            } else {
+                println!("Suggested ignore rules:");
+                if suggestions.is_empty() {
+                    println!("No suggestions found.");
+                }
+                for suggestion in suggestions {
+                    println!(
+                        "{}  {} B across {} path(s) [{}]",
+                        suggestion.rule,
+                        suggestion.estimated_bytes,
+                        suggestion.matched_paths,
+                        suggestion.category
+                    );
+                }
+            }
+        }
     }
 
     Ok(())
@@ -411,6 +447,9 @@ pub fn error_code(error: &(dyn Error + 'static)) -> &'static str {
     }
     if error.downcast_ref::<DoctorError>().is_some() {
         return "doctor_failed";
+    }
+    if error.downcast_ref::<IgnoreError>().is_some() {
+        return "ignore_scan_failed";
     }
     if let Some(error) = error.downcast_ref::<RecoveryError>() {
         return match error {

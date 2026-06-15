@@ -18,6 +18,7 @@ mod diff;
 mod doctor;
 mod explain;
 mod history;
+mod ignore;
 mod manifest;
 mod recovery;
 mod restore;
@@ -42,6 +43,7 @@ pub use explain::{ExplainError, ExplainReport, GrowthContributor, explain_snapsh
 pub use history::{
     HistoryError, OperationKind, OperationRecord, append_operation, read_operation_history,
 };
+pub use ignore::{IgnoreError, IgnoreSuggestion, suggest_ignores};
 pub use manifest::{
     FileEntry, FileType, ManifestError, ManifestSummary, SnapshotManifest, list_manifests,
     read_manifest, validate_manifest, verify_manifest_chunks, write_manifest,
