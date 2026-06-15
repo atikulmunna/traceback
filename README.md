@@ -30,7 +30,7 @@ diff
 explain
 ```
 
-Repository initialization, verified local chunk storage, staged snapshot manifest publication, metadata-only filesystem scanning, streaming backup and restore, writer locking, interrupted-write recovery, snapshot listing, full and selected-path restore, timestamp restoration, Unix permission preservation, portable path collision checks, symlink-safe restore containment, restore rehearsal, repository integrity checks, rich snapshot diffs, and backup explanations are implemented.
+Repository initialization, verified local chunk storage, staged snapshot manifest publication, metadata-only filesystem scanning, streaming backup and restore, writer locking, interrupted-write recovery, snapshot listing, full and selected-path restore, timestamp restoration, Unix permission preservation, portable path collision checks, symlink-safe restore containment, restore rehearsal, repository integrity checks, rich snapshot diffs, backup explanations, and repository-wide chunk reference accounting are implemented.
 
 `snapshots`, `check`, `diff`, and `explain` support machine-readable output with the global
 `--json` flag:

@@ -10,6 +10,7 @@ use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
+mod accounting;
 mod check;
 mod chunk;
 mod diff;
@@ -18,8 +19,13 @@ mod manifest;
 mod recovery;
 mod restore;
 
+pub use accounting::{
+    AccountingError, ChunkReference, ChunkReferenceReport, account_chunk_references,
+};
 pub use check::{CheckIssue, CheckReport, check_repository};
-pub use chunk::{ChunkError, ChunkMetadata, StoreChunkOutcome, read_chunk, store_chunk};
+pub use chunk::{
+    ChunkError, ChunkMetadata, StoreChunkOutcome, read_chunk, read_chunk_metadata, store_chunk,
+};
 pub use diff::{DiffEntry, DiffError, SnapshotDiff, diff_snapshots};
 pub use explain::{ExplainError, ExplainReport, GrowthContributor, explain_snapshot};
 pub use manifest::{

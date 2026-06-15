@@ -115,6 +115,11 @@ pub fn read_chunk(repository: &Path, hash: &str) -> Result<Vec<u8>, ChunkError> 
     read_chunk_file(&path, hash)
 }
 
+pub fn read_chunk_metadata(repository: &Path, hash: &str) -> Result<ChunkMetadata, ChunkError> {
+    let path = chunk_path(repository, hash)?;
+    read_verified_metadata(&path, hash)
+}
+
 fn read_chunk_file(path: &Path, hash: &str) -> Result<Vec<u8>, ChunkError> {
     let file = fs::read(path).map_err(|source| io_error(path, source))?;
     let (metadata, payload) = decode_header(path, hash, &file)?;
