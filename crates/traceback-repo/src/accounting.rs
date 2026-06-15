@@ -32,6 +32,13 @@ pub struct ChunkReference {
     pub stored_size: u64,
     pub snapshot_references: usize,
     pub file_references: usize,
+    pub references: Vec<ChunkFileReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ChunkFileReference {
+    pub snapshot_id: String,
+    pub path: String,
 }
 
 #[derive(Default)]
@@ -85,6 +92,11 @@ pub fn account_chunk_references(
             stored_size: metadata.stored_size,
             snapshot_references: references.snapshots.len(),
             file_references: references.files.len(),
+            references: references
+                .files
+                .into_iter()
+                .map(|(snapshot_id, path)| ChunkFileReference { snapshot_id, path })
+                .collect(),
         });
     }
 

@@ -11,6 +11,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 mod accounting;
+mod blame;
 mod check;
 mod chunk;
 mod diff;
@@ -20,7 +21,11 @@ mod recovery;
 mod restore;
 
 pub use accounting::{
-    AccountingError, ChunkReference, ChunkReferenceReport, account_chunk_references,
+    AccountingError, ChunkFileReference, ChunkReference, ChunkReferenceReport,
+    account_chunk_references,
+};
+pub use blame::{
+    BLAME_ACCOUNTING_METHOD, BlameError, StorageBlameEntry, StorageBlameReport, blame_snapshot,
 };
 pub use check::{CheckIssue, CheckReport, check_repository};
 pub use chunk::{

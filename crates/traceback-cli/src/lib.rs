@@ -4,9 +4,10 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
-    CheckIssue, ChunkError, DiffEntry, DiffError, ExplainError, ExplainReport, FileEntry, FileType,
-    InitOutcome, ManifestError, ManifestSummary, RecoveryError, RepositoryError, RestoreError,
-    SnapshotDiff, SnapshotManifest, StoreChunkOutcome, acquire_writer_lock, check_repository,
+    BlameError, CheckIssue, ChunkError, DiffEntry, DiffError, ExplainError, ExplainReport,
+    FileEntry, FileType, InitOutcome, ManifestError, ManifestSummary, RecoveryError,
+    RepositoryError, RestoreError, SnapshotDiff, SnapshotManifest, StorageBlameEntry,
+    StorageBlameReport, StoreChunkOutcome, acquire_writer_lock, blame_snapshot, check_repository,
     diff_snapshots, explain_snapshot, init_repository, list_manifests, recover_interrupted_writes,
     rehearse_restore, restore_snapshot, restore_snapshot_path, store_chunk, validate_repository,
     write_manifest,
@@ -98,6 +99,15 @@ pub enum Command {
     },
     /// Explain what changed and caused storage growth in a snapshot.
     Explain {
+        /// Snapshot ID or "latest".
+        snapshot: String,
+
+        /// Backup repository directory.
+        #[arg(long)]
+        repo: PathBuf,
+    },
+    /// Attribute logical and physical storage to snapshot paths.
+    BlameSize {
         /// Snapshot ID or "latest".
         snapshot: String,
 
@@ -266,6 +276,15 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 print_explain_report(&report);
             }
         }
+        Command::BlameSize { snapshot, repo } => {
+            validate_repository(&repo)?;
+            let report = blame_snapshot(&repo, &snapshot)?;
+            if json {
+                print_json(&BlameJson::from(&report))?;
+            } else {
+                print_blame_report(&report);
+            }
+        }
     }
 
     Ok(())
@@ -325,6 +344,12 @@ pub fn error_code(error: &(dyn Error + 'static)) -> &'static str {
             ExplainError::SnapshotNotFound(_) => "snapshot_not_found",
             ExplainError::Manifest(_) | ExplainError::Diff(_) => "explain_data_invalid",
             ExplainError::Chunk(_) => "explain_chunk_invalid",
+        };
+    }
+    if let Some(error) = error.downcast_ref::<BlameError>() {
+        return match error {
+            BlameError::NoSnapshots | BlameError::SnapshotNotFound(_) => "snapshot_not_found",
+            BlameError::Manifest(_) | BlameError::Accounting(_) => "blame_data_invalid",
         };
     }
     if let Some(error) = error.downcast_ref::<RecoveryError>() {
@@ -474,6 +499,54 @@ impl From<&ExplainReport> for ExplainJson {
                     new_chunk_bytes: contributor.new_chunk_bytes,
                 })
                 .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct BlameJson {
+    snapshot_id: String,
+    accounting_method: String,
+    logical_bytes: u64,
+    unique_stored_bytes: u64,
+    shared_stored_bytes: u64,
+    reclaimable_stored_bytes: u64,
+    entries: Vec<BlameEntryJson>,
+}
+
+#[derive(Serialize)]
+struct BlameEntryJson {
+    path: String,
+    file_type: FileType,
+    logical_bytes: u64,
+    unique_stored_bytes: u64,
+    shared_stored_bytes: u64,
+    reclaimable_stored_bytes: u64,
+}
+
+impl From<&StorageBlameEntry> for BlameEntryJson {
+    fn from(entry: &StorageBlameEntry) -> Self {
+        Self {
+            path: entry.path.clone(),
+            file_type: entry.file_type,
+            logical_bytes: entry.logical_bytes,
+            unique_stored_bytes: entry.unique_stored_bytes,
+            shared_stored_bytes: entry.shared_stored_bytes,
+            reclaimable_stored_bytes: entry.reclaimable_stored_bytes,
+        }
+    }
+}
+
+impl From<&StorageBlameReport> for BlameJson {
+    fn from(report: &StorageBlameReport) -> Self {
+        Self {
+            snapshot_id: report.snapshot_id.clone(),
+            accounting_method: report.accounting_method.clone(),
+            logical_bytes: report.logical_bytes,
+            unique_stored_bytes: report.unique_stored_bytes,
+            shared_stored_bytes: report.shared_stored_bytes,
+            reclaimable_stored_bytes: report.reclaimable_stored_bytes,
+            entries: report.entries.iter().map(BlameEntryJson::from).collect(),
         }
     }
 }
@@ -883,6 +956,31 @@ fn print_explain_report(report: &ExplainReport) {
         println!(
             "  {}: {} B new chunk content",
             contributor.path, contributor.new_chunk_bytes
+        );
+    }
+}
+
+fn print_blame_report(report: &StorageBlameReport) {
+    println!("Storage blame completed.");
+    println!("Snapshot:             {}", report.snapshot_id);
+    println!("Accounting method:    {}", report.accounting_method);
+    println!("Logical size:         {} B", report.logical_bytes);
+    println!("Unique stored data:   {} B", report.unique_stored_bytes);
+    println!("Shared stored data:   {} B", report.shared_stored_bytes);
+    println!(
+        "Snapshot reclaimable: {} B",
+        report.reclaimable_stored_bytes
+    );
+    println!("Largest contributors:");
+    for entry in report.entries.iter().take(20) {
+        println!(
+            "  {} ({}) logical={} B unique={} B shared={} B reclaimable={} B",
+            entry.path,
+            file_type_name(entry.file_type),
+            entry.logical_bytes,
+            entry.unique_stored_bytes,
+            entry.shared_stored_bytes,
+            entry.reclaimable_stored_bytes
         );
     }
 }
