@@ -13,6 +13,8 @@ const LARGE_GENERATED_BYTES: u64 = 100 * 1024 * 1024;
 pub enum IgnoreError {
     #[error("suggestion path does not exist: {0}")]
     PathMissing(PathBuf),
+    #[error("ignore rule is invalid: {0}")]
+    InvalidRule(String),
     #[error("filesystem error at {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
 }
@@ -23,6 +25,13 @@ pub struct IgnoreSuggestion {
     pub category: String,
     pub estimated_bytes: u64,
     pub matched_paths: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ApplyIgnoreReport {
+    pub path: PathBuf,
+    pub added: Vec<String>,
+    pub skipped_existing: Vec<String>,
 }
 
 #[derive(Default)]
@@ -55,6 +64,62 @@ pub fn suggest_ignores(path: &Path) -> Result<Vec<IgnoreSuggestion>, IgnoreError
             .then_with(|| left.rule.cmp(&right.rule))
     });
     Ok(suggestions)
+}
+
+pub fn apply_ignore_rules(path: &Path, rules: &[String]) -> Result<ApplyIgnoreReport, IgnoreError> {
+    if !path.exists() {
+        return Err(IgnoreError::PathMissing(path.to_owned()));
+    }
+    let ignore_path = if path.is_dir() {
+        path.join(".tracebackignore")
+    } else {
+        path.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(".tracebackignore")
+    };
+    let existing = if ignore_path.exists() {
+        fs::read_to_string(&ignore_path).map_err(|source| io_error(&ignore_path, source))?
+    } else {
+        String::new()
+    };
+    let existing_rules = existing
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut added = Vec::new();
+    let mut skipped_existing = Vec::new();
+    for rule in rules {
+        let rule = rule.trim();
+        if rule.is_empty() || rule.contains(['\0', '\n', '\r']) {
+            return Err(IgnoreError::InvalidRule(rule.to_owned()));
+        }
+        if existing_rules.contains(rule) || added.iter().any(|added| added == rule) {
+            skipped_existing.push(rule.to_owned());
+        } else {
+            added.push(rule.to_owned());
+        }
+    }
+    if !added.is_empty() {
+        let mut updated = existing;
+        if !updated.is_empty() && !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        if !updated.is_empty() {
+            updated.push('\n');
+        }
+        updated.push_str("# Added by TraceBack ignore apply\n");
+        for rule in &added {
+            updated.push_str(rule);
+            updated.push('\n');
+        }
+        fs::write(&ignore_path, updated).map_err(|source| io_error(&ignore_path, source))?;
+    }
+    Ok(ApplyIgnoreReport {
+        path: ignore_path,
+        added,
+        skipped_existing,
+    })
 }
 
 fn inspect_path(
@@ -177,7 +242,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::suggest_ignores;
+    use super::{apply_ignore_rules, suggest_ignores};
 
     #[test]
     fn suggests_common_directories_temporary_files_and_large_generated_files() {
@@ -211,5 +276,32 @@ mod tests {
                 .iter()
                 .any(|suggestion| suggestion.rule == "artifact.iso")
         );
+    }
+
+    #[test]
+    fn applies_only_missing_rules_and_preserves_existing_content() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let root = temporary.path();
+        fs::write(root.join(".tracebackignore"), "# user rule\n*.log\n")
+            .expect("ignore file should be written");
+
+        let report = apply_ignore_rules(
+            root,
+            &[
+                "*.log".to_owned(),
+                "**/target".to_owned(),
+                "*.tmp".to_owned(),
+            ],
+        )
+        .expect("rules should apply");
+
+        assert_eq!(report.added, ["**/target", "*.tmp"]);
+        assert_eq!(report.skipped_existing, ["*.log"]);
+        let contents =
+            fs::read_to_string(root.join(".tracebackignore")).expect("ignore file should read");
+        assert!(contents.starts_with("# user rule\n*.log\n"));
+        assert_eq!(contents.matches("*.log").count(), 1);
+        assert!(contents.contains("**/target\n"));
+        assert!(contents.contains("*.tmp\n"));
     }
 }

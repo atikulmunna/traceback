@@ -8,10 +8,10 @@ use traceback_repo::{
     ExplainError, ExplainReport, FileEntry, FileType, FindingLevel, HistoryError, IgnoreError,
     InitOutcome, ManifestError, ManifestSummary, OperationKind, RecoveryError, RepositoryError,
     RestoreError, SnapshotDiff, SnapshotManifest, StorageBlameEntry, StorageBlameReport,
-    StoreChunkOutcome, acquire_writer_lock, append_operation, blame_snapshot, check_repository,
-    diff_snapshots, doctor_repository, explain_snapshot, init_repository, list_manifests,
-    recover_interrupted_writes, rehearse_restore, restore_snapshot, restore_snapshot_path,
-    store_chunk, suggest_ignores, validate_repository, write_manifest,
+    StoreChunkOutcome, acquire_writer_lock, append_operation, apply_ignore_rules, blame_snapshot,
+    check_repository, diff_snapshots, doctor_repository, explain_snapshot, init_repository,
+    list_manifests, recover_interrupted_writes, rehearse_restore, restore_snapshot,
+    restore_snapshot_path, store_chunk, suggest_ignores, validate_repository, write_manifest,
 };
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
 use uuid::Uuid;
@@ -135,6 +135,23 @@ pub enum IgnoreCommand {
     Suggest {
         /// Source tree to inspect.
         path: PathBuf,
+    },
+    /// Preview or append reviewed ignore rules.
+    Apply {
+        /// Source tree whose .tracebackignore file will be updated.
+        path: PathBuf,
+
+        /// Include all currently suggested rules.
+        #[arg(long)]
+        suggested: bool,
+
+        /// Include a specific reviewed rule; may be repeated.
+        #[arg(long = "rule")]
+        rules: Vec<String>,
+
+        /// Confirm writing the reviewed rules.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -375,6 +392,57 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 }
             }
         }
+        Command::Ignore {
+            command:
+                IgnoreCommand::Apply {
+                    path,
+                    suggested,
+                    mut rules,
+                    yes,
+                },
+        } => {
+            if suggested {
+                rules.extend(
+                    suggest_ignores(&path)?
+                        .into_iter()
+                        .map(|suggestion| suggestion.rule),
+                );
+            }
+            rules.sort();
+            rules.dedup();
+            if rules.is_empty() {
+                return Err(IgnoreError::InvalidRule("no rules selected".to_owned()).into());
+            }
+            if !yes {
+                if json {
+                    print_json(&IgnoreApplyPreview {
+                        applied: false,
+                        path: ignore_file_path(&path),
+                        rules,
+                    })?;
+                } else {
+                    println!("Ignore apply preview; no file was changed.");
+                    println!("Target: {}", ignore_file_path(&path).display());
+                    for rule in rules {
+                        println!("  {rule}");
+                    }
+                    println!("Re-run with --yes to apply these reviewed rules.");
+                }
+            } else {
+                let report = apply_ignore_rules(&path, &rules)?;
+                if json {
+                    print_json(&report)?;
+                } else {
+                    println!("Ignore rules applied.");
+                    println!("Target:               {}", report.path.display());
+                    println!("Rules added:          {}", report.added.len());
+                    println!("Existing rules skipped: {}", report.skipped_existing.len());
+                    for rule in report.added {
+                        println!("A {rule}");
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -504,6 +572,13 @@ struct CheckJson {
 struct RecoveryJson {
     staging_entries_removed: usize,
     temporary_chunks_removed: usize,
+}
+
+#[derive(Serialize)]
+struct IgnoreApplyPreview {
+    applied: bool,
+    path: PathBuf,
+    rules: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -988,6 +1063,16 @@ fn parse_restore_expression(snapshot: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((snapshot_id, selected_path))
+}
+
+fn ignore_file_path(path: &std::path::Path) -> PathBuf {
+    if path.is_dir() {
+        path.join(".tracebackignore")
+    } else {
+        path.parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(".tracebackignore")
+    }
 }
 
 fn print_snapshot_diff(diff: &SnapshotDiff) {
