@@ -27,17 +27,19 @@ rehearse
 check
 recover
 diff
+explain
 ```
 
-Repository initialization, verified local chunk storage, staged snapshot manifest publication, metadata-only filesystem scanning, streaming backup and restore, writer locking, interrupted-write recovery, snapshot listing, full and selected-path restore, timestamp restoration, Unix permission preservation, portable path collision checks, symlink-safe restore containment, restore rehearsal, repository integrity checks, and rich snapshot diffs are implemented.
+Repository initialization, verified local chunk storage, staged snapshot manifest publication, metadata-only filesystem scanning, streaming backup and restore, writer locking, interrupted-write recovery, snapshot listing, full and selected-path restore, timestamp restoration, Unix permission preservation, portable path collision checks, symlink-safe restore containment, restore rehearsal, repository integrity checks, rich snapshot diffs, and backup explanations are implemented.
 
-`snapshots`, `check`, and `diff` support machine-readable output with the global
+`snapshots`, `check`, `diff`, and `explain` support machine-readable output with the global
 `--json` flag:
 
 ```text
 traceback --json snapshots --repo ./my-backups
 traceback check --repo ./my-backups --json
 traceback --json diff snap_old snap_new --repo ./my-backups
+traceback --json explain latest --repo ./my-backups
 ```
 
 ## Development Approach

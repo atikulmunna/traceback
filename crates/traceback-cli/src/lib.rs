@@ -4,11 +4,12 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
-    CheckIssue, ChunkError, DiffEntry, DiffError, FileEntry, FileType, InitOutcome, ManifestError,
-    ManifestSummary, RecoveryError, RepositoryError, RestoreError, SnapshotDiff, SnapshotManifest,
-    StoreChunkOutcome, acquire_writer_lock, check_repository, diff_snapshots, init_repository,
-    list_manifests, recover_interrupted_writes, rehearse_restore, restore_snapshot,
-    restore_snapshot_path, store_chunk, validate_repository, write_manifest,
+    CheckIssue, ChunkError, DiffEntry, DiffError, ExplainError, ExplainReport, FileEntry, FileType,
+    InitOutcome, ManifestError, ManifestSummary, RecoveryError, RepositoryError, RestoreError,
+    SnapshotDiff, SnapshotManifest, StoreChunkOutcome, acquire_writer_lock, check_repository,
+    diff_snapshots, explain_snapshot, init_repository, list_manifests, recover_interrupted_writes,
+    rehearse_restore, restore_snapshot, restore_snapshot_path, store_chunk, validate_repository,
+    write_manifest,
 };
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
 use uuid::Uuid;
@@ -90,6 +91,15 @@ pub enum Command {
 
         /// Newer snapshot ID.
         new: String,
+
+        /// Backup repository directory.
+        #[arg(long)]
+        repo: PathBuf,
+    },
+    /// Explain what changed and caused storage growth in a snapshot.
+    Explain {
+        /// Snapshot ID or "latest".
+        snapshot: String,
 
         /// Backup repository directory.
         #[arg(long)]
@@ -247,6 +257,15 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 print_snapshot_diff(&diff);
             }
         }
+        Command::Explain { snapshot, repo } => {
+            validate_repository(&repo)?;
+            let report = explain_snapshot(&repo, &snapshot)?;
+            if json {
+                print_json(&ExplainJson::from(&report))?;
+            } else {
+                print_explain_report(&report);
+            }
+        }
     }
 
     Ok(())
@@ -299,6 +318,14 @@ pub fn error_code(error: &(dyn Error + 'static)) -> &'static str {
     }
     if error.downcast_ref::<DiffError>().is_some() {
         return "diff_failed";
+    }
+    if let Some(error) = error.downcast_ref::<ExplainError>() {
+        return match error {
+            ExplainError::NoSnapshots => "snapshot_not_found",
+            ExplainError::SnapshotNotFound(_) => "snapshot_not_found",
+            ExplainError::Manifest(_) | ExplainError::Diff(_) => "explain_data_invalid",
+            ExplainError::Chunk(_) => "explain_chunk_invalid",
+        };
     }
     if let Some(error) = error.downcast_ref::<RecoveryError>() {
         return match error {
@@ -401,6 +428,52 @@ impl From<&SnapshotDiff> for DiffJson {
             removed: diff.removed.iter().map(DiffEntryJson::from).collect(),
             modified: diff.modified.iter().map(DiffEntryJson::from).collect(),
             unchanged: diff.unchanged,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ExplainJson {
+    snapshot_id: String,
+    previous_snapshot_id: Option<String>,
+    added: usize,
+    removed: usize,
+    modified: usize,
+    unchanged: usize,
+    logical_bytes: u64,
+    newly_stored_bytes: u64,
+    new_chunk_bytes: u64,
+    reused_chunk_bytes: u64,
+    growth_contributors: Vec<GrowthContributorJson>,
+}
+
+#[derive(Serialize)]
+struct GrowthContributorJson {
+    path: String,
+    new_chunk_bytes: u64,
+}
+
+impl From<&ExplainReport> for ExplainJson {
+    fn from(report: &ExplainReport) -> Self {
+        Self {
+            snapshot_id: report.snapshot_id.clone(),
+            previous_snapshot_id: report.previous_snapshot_id.clone(),
+            added: report.added,
+            removed: report.removed,
+            modified: report.modified,
+            unchanged: report.unchanged,
+            logical_bytes: report.logical_bytes,
+            newly_stored_bytes: report.newly_stored_bytes,
+            new_chunk_bytes: report.new_chunk_bytes,
+            reused_chunk_bytes: report.reused_chunk_bytes,
+            growth_contributors: report
+                .growth_contributors
+                .iter()
+                .map(|contributor| GrowthContributorJson {
+                    path: contributor.path.clone(),
+                    new_chunk_bytes: contributor.new_chunk_bytes,
+                })
+                .collect(),
         }
     }
 }
@@ -783,6 +856,34 @@ fn file_type_name(file_type: FileType) -> &'static str {
         FileType::Directory => "directory",
         FileType::File => "file",
         FileType::Symlink => "symlink",
+    }
+}
+
+fn print_explain_report(report: &ExplainReport) {
+    println!("Snapshot explanation completed.");
+    println!("Snapshot:             {}", report.snapshot_id);
+    println!(
+        "Previous snapshot:    {}",
+        report.previous_snapshot_id.as_deref().unwrap_or("none")
+    );
+    println!("Added paths:          {}", report.added);
+    println!("Removed paths:        {}", report.removed);
+    println!("Modified paths:       {}", report.modified);
+    println!("Unchanged paths:      {}", report.unchanged);
+    println!("Logical size:         {} B", report.logical_bytes);
+    println!("New data stored:      {} B", report.newly_stored_bytes);
+    println!("New chunk content:    {} B", report.new_chunk_bytes);
+    println!("Reused chunk content: {} B", report.reused_chunk_bytes);
+    if report.growth_contributors.is_empty() {
+        println!("No new chunk contributors.");
+        return;
+    }
+    println!("Major growth contributors:");
+    for contributor in report.growth_contributors.iter().take(10) {
+        println!(
+            "  {}: {} B new chunk content",
+            contributor.path, contributor.new_chunk_bytes
+        );
     }
 }
 
