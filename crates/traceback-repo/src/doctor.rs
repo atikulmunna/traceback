@@ -5,9 +5,11 @@ use thiserror::Error;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
-    HistoryError, ManifestError, OperationKind, check_repository, list_manifests,
+    CheckIssue, HistoryError, ManifestError, OperationKind, check_repository, list_manifests,
     read_operation_history,
 };
+
+const SCORING_VERSION: &str = "reliability-v1";
 
 #[derive(Debug, Error)]
 pub enum DoctorError {
@@ -42,7 +44,25 @@ pub struct DoctorReport {
     pub integrity_passed: bool,
     pub latest_check_passed: Option<bool>,
     pub latest_rehearsal_passed: Option<bool>,
+    pub health_score: u8,
+    pub scoring_version: String,
+    pub score_categories: Vec<ScoreCategory>,
     pub findings: Vec<DoctorFinding>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScoreStatus {
+    Passed,
+    Failed,
+    NotEvaluated,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ScoreCategory {
+    pub code: String,
+    pub points: u8,
+    pub status: ScoreStatus,
 }
 
 pub fn doctor_repository(repository: &Path) -> Result<DoctorReport, DoctorError> {
@@ -71,6 +91,16 @@ pub fn doctor_repository(repository: &Path) -> Result<DoctorReport, DoctorError>
                 latest.map_or_else(String::new, |manifest| manifest.created_at.clone()),
             )
         })?;
+    let score_categories = score_categories(
+        latest_snapshot_age_seconds,
+        check.passed(),
+        latest_rehearsal_passed,
+        !check
+            .issues
+            .iter()
+            .any(|issue| matches!(issue, CheckIssue::ReferencedChunk { .. })),
+    );
+    let health_score = calculate_score(&score_categories);
 
     let mut findings = Vec::new();
     findings.push(backup_age_finding(latest_snapshot_age_seconds));
@@ -133,8 +163,70 @@ pub fn doctor_repository(repository: &Path) -> Result<DoctorReport, DoctorError>
         integrity_passed: check.passed(),
         latest_check_passed,
         latest_rehearsal_passed,
+        health_score,
+        scoring_version: SCORING_VERSION.to_owned(),
+        score_categories,
         findings,
     })
+}
+
+fn score_categories(
+    backup_age_seconds: Option<i64>,
+    integrity_passed: bool,
+    rehearsal_passed: Option<bool>,
+    chunks_intact: bool,
+) -> Vec<ScoreCategory> {
+    vec![
+        score_category(
+            "backup_recent",
+            20,
+            passed_status(backup_age_seconds.is_some_and(|seconds| seconds <= 86_400)),
+        ),
+        score_category("repository_check", 25, passed_status(integrity_passed)),
+        score_category(
+            "restore_rehearsal",
+            20,
+            passed_status(rehearsal_passed.unwrap_or(false)),
+        ),
+        score_category("chunk_integrity", 15, passed_status(chunks_intact)),
+        score_category("ignore_quality", 5, ScoreStatus::NotEvaluated),
+        score_category("retention_policy", 5, ScoreStatus::NotEvaluated),
+        score_category("remote_copy", 5, ScoreStatus::NotEvaluated),
+        score_category("encryption", 5, ScoreStatus::NotEvaluated),
+    ]
+}
+
+fn score_category(code: &str, points: u8, status: ScoreStatus) -> ScoreCategory {
+    ScoreCategory {
+        code: code.to_owned(),
+        points,
+        status,
+    }
+}
+
+fn passed_status(passed: bool) -> ScoreStatus {
+    if passed {
+        ScoreStatus::Passed
+    } else {
+        ScoreStatus::Failed
+    }
+}
+
+fn calculate_score(categories: &[ScoreCategory]) -> u8 {
+    let possible: u16 = categories
+        .iter()
+        .filter(|category| category.status != ScoreStatus::NotEvaluated)
+        .map(|category| u16::from(category.points))
+        .sum();
+    if possible == 0 {
+        return 100;
+    }
+    let earned: u16 = categories
+        .iter()
+        .filter(|category| category.status == ScoreStatus::Passed)
+        .map(|category| u16::from(category.points))
+        .sum();
+    u8::try_from((earned * 100) / possible).expect("health score is at most 100")
 }
 
 fn backup_age_finding(age: Option<i64>) -> DoctorFinding {
@@ -223,7 +315,7 @@ mod tests {
 
     use crate::{OperationKind, append_operation, init_repository};
 
-    use super::{FindingLevel, doctor_repository};
+    use super::{FindingLevel, ScoreStatus, calculate_score, doctor_repository, score_category};
 
     #[test]
     fn reports_actionable_findings_for_empty_repository() {
@@ -255,5 +347,27 @@ mod tests {
             .find(|finding| finding.code == "rehearsal_history")
             .expect("rehearsal finding should exist");
         assert_eq!(rehearsal.level, FindingLevel::Warning);
+        assert_eq!(report.scoring_version, "reliability-v1");
+        assert!(
+            report
+                .score_categories
+                .iter()
+                .filter(|category| category.status == ScoreStatus::NotEvaluated)
+                .all(|category| matches!(
+                    category.code.as_str(),
+                    "ignore_quality" | "retention_policy" | "remote_copy" | "encryption"
+                ))
+        );
+    }
+
+    #[test]
+    fn score_omits_unavailable_categories_from_denominator() {
+        let categories = vec![
+            score_category("available", 20, ScoreStatus::Passed),
+            score_category("failed", 20, ScoreStatus::Failed),
+            score_category("unavailable", 60, ScoreStatus::NotEvaluated),
+        ];
+
+        assert_eq!(calculate_score(&categories), 50);
     }
 }

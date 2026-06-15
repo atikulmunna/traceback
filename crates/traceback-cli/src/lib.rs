@@ -1048,6 +1048,10 @@ fn print_blame_report(report: &StorageBlameReport) {
 fn print_doctor_report(report: &DoctorReport) {
     println!("Repository doctor completed.");
     println!(
+        "Reliability score:    {}/100 ({})",
+        report.health_score, report.scoring_version
+    );
+    println!(
         "Latest snapshot:      {}",
         report.latest_snapshot_id.as_deref().unwrap_or("none")
     );
@@ -1059,6 +1063,12 @@ fn print_doctor_report(report: &DoctorReport) {
             "FAIL"
         }
     );
+    for category in &report.score_categories {
+        println!(
+            "Score category:       {} = {:?} ({} points)",
+            category.code, category.status, category.points
+        );
+    }
     for finding in &report.findings {
         let label = match finding.level {
             FindingLevel::Good => "GOOD",

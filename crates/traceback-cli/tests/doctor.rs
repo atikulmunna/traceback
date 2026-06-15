@@ -70,6 +70,17 @@ fn doctor_supports_structured_findings() {
     assert_eq!(json["integrity_passed"], true);
     assert_eq!(json["latest_check_passed"], true);
     assert_eq!(json["latest_rehearsal_passed"], true);
+    assert_eq!(json["health_score"], 100);
+    assert_eq!(json["scoring_version"], "reliability-v1");
+    assert!(
+        json["score_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|category| {
+                category["code"] == "encryption" && category["status"] == "not_evaluated"
+            })
+    );
     assert!(
         json["findings"]
             .as_array()

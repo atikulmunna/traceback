@@ -34,7 +34,10 @@ pub use chunk::{
     ChunkError, ChunkMetadata, StoreChunkOutcome, read_chunk, read_chunk_metadata, store_chunk,
 };
 pub use diff::{DiffEntry, DiffError, SnapshotDiff, diff_snapshots};
-pub use doctor::{DoctorError, DoctorFinding, DoctorReport, FindingLevel, doctor_repository};
+pub use doctor::{
+    DoctorError, DoctorFinding, DoctorReport, FindingLevel, ScoreCategory, ScoreStatus,
+    doctor_repository,
+};
 pub use explain::{ExplainError, ExplainReport, GrowthContributor, explain_snapshot};
 pub use history::{
     HistoryError, OperationKind, OperationRecord, append_operation, read_operation_history,
