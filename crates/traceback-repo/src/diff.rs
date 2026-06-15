@@ -5,7 +5,7 @@ use std::{
 
 use thiserror::Error;
 
-use crate::{FileEntry, ManifestError, read_manifest};
+use crate::{FileEntry, FileType, ManifestError, read_manifest};
 
 #[derive(Debug, Error)]
 pub enum DiffError {
@@ -17,10 +17,22 @@ pub enum DiffError {
 pub struct SnapshotDiff {
     pub old_snapshot_id: String,
     pub new_snapshot_id: String,
-    pub added: Vec<String>,
-    pub removed: Vec<String>,
-    pub modified: Vec<String>,
+    pub added: Vec<DiffEntry>,
+    pub removed: Vec<DiffEntry>,
+    pub modified: Vec<DiffEntry>,
     pub unchanged: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffEntry {
+    pub path: String,
+    pub old_type: Option<FileType>,
+    pub new_type: Option<FileType>,
+    pub old_size: u64,
+    pub new_size: u64,
+    pub byte_delta: i128,
+    pub type_changed: bool,
+    pub content_changed: bool,
 }
 
 impl SnapshotDiff {
@@ -55,15 +67,41 @@ pub fn diff_snapshots(
 
     for path in paths {
         match (old_entries.get(&path), new_entries.get(&path)) {
-            (None, Some(_)) => diff.added.push(path),
-            (Some(_), None) => diff.removed.push(path),
+            (None, Some(new)) => diff.added.push(diff_entry(path, None, Some(new))),
+            (Some(old), None) => diff.removed.push(diff_entry(path, Some(old), None)),
             (Some(old), Some(new)) if entries_match(old, new) => diff.unchanged += 1,
-            (Some(_), Some(_)) => diff.modified.push(path),
+            (Some(old), Some(new)) => diff.modified.push(diff_entry(path, Some(old), Some(new))),
             (None, None) => unreachable!("path came from at least one manifest"),
         }
     }
 
     Ok(diff)
+}
+
+fn diff_entry(path: String, old: Option<&FileEntry>, new: Option<&FileEntry>) -> DiffEntry {
+    let old_size = old.map_or(0, |entry| entry.size);
+    let new_size = new.map_or(0, |entry| entry.size);
+    DiffEntry {
+        path,
+        old_type: old.map(|entry| entry.file_type),
+        new_type: new.map(|entry| entry.file_type),
+        old_size,
+        new_size,
+        byte_delta: i128::from(new_size) - i128::from(old_size),
+        type_changed: old
+            .zip(new)
+            .is_some_and(|(old, new)| old.file_type != new.file_type),
+        content_changed: old
+            .zip(new)
+            .is_some_and(|(old, new)| content_identity(old) != content_identity(new)),
+    }
+}
+
+fn content_identity(entry: &FileEntry) -> (Option<&str>, Option<&str>) {
+    (
+        entry.content_hash.as_deref(),
+        entry.symlink_target.as_deref(),
+    )
 }
 
 fn entries_by_path(entries: &[FileEntry]) -> BTreeMap<String, &FileEntry> {
@@ -104,11 +142,46 @@ mod tests {
         let diff =
             diff_snapshots(&repository, "snap_old", "snap_new").expect("snapshots should diff");
 
-        assert_eq!(diff.added, ["source/added.txt"]);
-        assert_eq!(diff.removed, ["source/removed.txt"]);
-        assert_eq!(diff.modified, ["source/modified.txt"]);
+        assert_eq!(diff.added[0].path, "source/added.txt");
+        assert_eq!(diff.added[0].old_size, 0);
+        assert_eq!(diff.added[0].new_size, 5);
+        assert_eq!(diff.added[0].byte_delta, 5);
+        assert_eq!(diff.removed[0].path, "source/removed.txt");
+        assert_eq!(diff.removed[0].byte_delta, -7);
+        assert_eq!(diff.modified[0].path, "source/modified.txt");
+        assert_eq!(diff.modified[0].old_size, 3);
+        assert_eq!(diff.modified[0].new_size, 3);
+        assert!(diff.modified[0].content_changed);
+        assert!(!diff.modified[0].type_changed);
         assert_eq!(diff.unchanged, 2);
         assert_eq!(diff.changed_count(), 3);
+    }
+
+    #[test]
+    fn reports_type_changes() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        write_manifest(
+            &repository,
+            &manifest("snap_old", vec![file("source/item", "old")]),
+        )
+        .expect("old manifest should be written");
+        write_manifest(
+            &repository,
+            &manifest("snap_new", vec![directory("source/item")]),
+        )
+        .expect("new manifest should be written");
+
+        let diff =
+            diff_snapshots(&repository, "snap_old", "snap_new").expect("snapshots should diff");
+
+        assert_eq!(diff.modified.len(), 1);
+        assert_eq!(diff.modified[0].old_type, Some(FileType::File));
+        assert_eq!(diff.modified[0].new_type, Some(FileType::Directory));
+        assert_eq!(diff.modified[0].byte_delta, -3);
+        assert!(diff.modified[0].type_changed);
+        assert!(diff.modified[0].content_changed);
     }
 
     fn old_entries() -> Vec<FileEntry> {

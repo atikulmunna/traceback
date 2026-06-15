@@ -47,6 +47,7 @@ fn diff_reports_changed_paths_between_backups() {
     assert!(stdout.contains("A source/added.txt"));
     assert!(stdout.contains("R source/removed.txt"));
     assert!(stdout.contains("M source/modified.txt"));
+    assert!(stdout.contains("file -> file, 3 -> 3 bytes, +0 bytes, content_changed=true"));
 }
 
 #[test]
@@ -118,8 +119,17 @@ fn diff_supports_json_output() {
         serde_json::from_slice(&output.stdout).expect("output should be valid JSON");
     assert_eq!(json["old_snapshot_id"], old_snapshot);
     assert_eq!(json["new_snapshot_id"], new_snapshot);
-    assert_eq!(json["added"][0], "source/added.txt");
-    assert_eq!(json["modified"][0], "source/note.txt");
+    assert_eq!(json["added"][0]["path"], "source/added.txt");
+    assert_eq!(json["added"][0]["old_type"], serde_json::Value::Null);
+    assert_eq!(json["added"][0]["new_type"], "file");
+    assert_eq!(json["added"][0]["old_size"], 0);
+    assert_eq!(json["added"][0]["new_size"], 5);
+    assert_eq!(json["added"][0]["byte_delta"], 5);
+    assert_eq!(json["modified"][0]["path"], "source/note.txt");
+    assert_eq!(json["modified"][0]["old_size"], 3);
+    assert_eq!(json["modified"][0]["new_size"], 3);
+    assert_eq!(json["modified"][0]["type_changed"], false);
+    assert_eq!(json["modified"][0]["content_changed"], true);
     assert_eq!(json["removed"].as_array().unwrap().len(), 0);
     assert_eq!(json["unchanged"], 0);
 }

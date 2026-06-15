@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
-    CheckIssue, ChunkError, DiffError, FileEntry, FileType, InitOutcome, ManifestError,
+    CheckIssue, ChunkError, DiffEntry, DiffError, FileEntry, FileType, InitOutcome, ManifestError,
     ManifestSummary, RecoveryError, RepositoryError, RestoreError, SnapshotDiff, SnapshotManifest,
     StoreChunkOutcome, acquire_writer_lock, check_repository, diff_snapshots, init_repository,
     list_manifests, recover_interrupted_writes, rehearse_restore, restore_snapshot,
@@ -359,10 +359,37 @@ struct RecoveryJson {
 struct DiffJson {
     old_snapshot_id: String,
     new_snapshot_id: String,
-    added: Vec<String>,
-    removed: Vec<String>,
-    modified: Vec<String>,
+    added: Vec<DiffEntryJson>,
+    removed: Vec<DiffEntryJson>,
+    modified: Vec<DiffEntryJson>,
     unchanged: usize,
+}
+
+#[derive(Serialize)]
+struct DiffEntryJson {
+    path: String,
+    old_type: Option<FileType>,
+    new_type: Option<FileType>,
+    old_size: u64,
+    new_size: u64,
+    byte_delta: i128,
+    type_changed: bool,
+    content_changed: bool,
+}
+
+impl From<&DiffEntry> for DiffEntryJson {
+    fn from(entry: &DiffEntry) -> Self {
+        Self {
+            path: entry.path.clone(),
+            old_type: entry.old_type,
+            new_type: entry.new_type,
+            old_size: entry.old_size,
+            new_size: entry.new_size,
+            byte_delta: entry.byte_delta,
+            type_changed: entry.type_changed,
+            content_changed: entry.content_changed,
+        }
+    }
 }
 
 impl From<&SnapshotDiff> for DiffJson {
@@ -370,9 +397,9 @@ impl From<&SnapshotDiff> for DiffJson {
         Self {
             old_snapshot_id: diff.old_snapshot_id.clone(),
             new_snapshot_id: diff.new_snapshot_id.clone(),
-            added: diff.added.clone(),
-            removed: diff.removed.clone(),
-            modified: diff.modified.clone(),
+            added: diff.added.iter().map(DiffEntryJson::from).collect(),
+            removed: diff.removed.iter().map(DiffEntryJson::from).collect(),
+            modified: diff.modified.iter().map(DiffEntryJson::from).collect(),
             unchanged: diff.unchanged,
         }
     }
@@ -731,14 +758,31 @@ fn print_snapshot_diff(diff: &SnapshotDiff) {
         return;
     }
 
-    for path in &diff.added {
-        println!("A {}", path);
+    for entry in &diff.added {
+        print_diff_entry("A", entry);
     }
-    for path in &diff.removed {
-        println!("R {}", path);
+    for entry in &diff.removed {
+        print_diff_entry("R", entry);
     }
-    for path in &diff.modified {
-        println!("M {}", path);
+    for entry in &diff.modified {
+        print_diff_entry("M", entry);
+    }
+}
+
+fn print_diff_entry(prefix: &str, entry: &DiffEntry) {
+    let old_type = entry.old_type.map(file_type_name).unwrap_or("-");
+    let new_type = entry.new_type.map(file_type_name).unwrap_or("-");
+    println!(
+        "{prefix} {} [{old_type} -> {new_type}, {} -> {} bytes, {:+} bytes, content_changed={}]",
+        entry.path, entry.old_size, entry.new_size, entry.byte_delta, entry.content_changed
+    );
+}
+
+fn file_type_name(file_type: FileType) -> &'static str {
+    match file_type {
+        FileType::Directory => "directory",
+        FileType::File => "file",
+        FileType::Symlink => "symlink",
     }
 }
 
