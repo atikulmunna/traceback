@@ -67,6 +67,11 @@ fn rehearse_fails_when_snapshot_cannot_restore() {
 
     assert!(!rehearsal.status.success());
     assert!(String::from_utf8_lossy(&rehearsal.stderr).contains("chunk verification failed"));
+    let records = read_history(&repository);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["operation"], "rehearse");
+    assert_eq!(records[0]["snapshot_id"], snapshot_id);
+    assert_eq!(records[0]["success"], false);
 }
 
 fn backup_snapshot_id(source: &std::path::Path, repository: &std::path::Path) -> String {
@@ -105,4 +110,12 @@ fn remove_first_chunk_file(repository: &std::path::Path) {
         }
     }
     panic!("expected at least one chunk file");
+}
+
+fn read_history(repository: &std::path::Path) -> Vec<serde_json::Value> {
+    fs::read_to_string(repository.join("logs/operations-v1.jsonl"))
+        .expect("history should be readable")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("history line should be valid JSON"))
+        .collect()
 }

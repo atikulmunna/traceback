@@ -5,12 +5,12 @@ use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
     BlameError, CheckIssue, ChunkError, DiffEntry, DiffError, ExplainError, ExplainReport,
-    FileEntry, FileType, InitOutcome, ManifestError, ManifestSummary, RecoveryError,
-    RepositoryError, RestoreError, SnapshotDiff, SnapshotManifest, StorageBlameEntry,
-    StorageBlameReport, StoreChunkOutcome, acquire_writer_lock, blame_snapshot, check_repository,
-    diff_snapshots, explain_snapshot, init_repository, list_manifests, recover_interrupted_writes,
-    rehearse_restore, restore_snapshot, restore_snapshot_path, store_chunk, validate_repository,
-    write_manifest,
+    FileEntry, FileType, HistoryError, InitOutcome, ManifestError, ManifestSummary, OperationKind,
+    RecoveryError, RepositoryError, RestoreError, SnapshotDiff, SnapshotManifest,
+    StorageBlameEntry, StorageBlameReport, StoreChunkOutcome, acquire_writer_lock,
+    append_operation, blame_snapshot, check_repository, diff_snapshots, explain_snapshot,
+    init_repository, list_manifests, recover_interrupted_writes, rehearse_restore,
+    restore_snapshot, restore_snapshot_path, store_chunk, validate_repository, write_manifest,
 };
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
 use uuid::Uuid;
@@ -192,7 +192,31 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         }
         Command::Rehearse { snapshot, repo } => {
             validate_repository(&repo)?;
-            let summary = rehearse_restore(&repo, &snapshot)?;
+            let summary = match rehearse_restore(&repo, &snapshot) {
+                Ok(summary) => {
+                    append_operation(
+                        &repo,
+                        OperationKind::Rehearse,
+                        Some(&snapshot),
+                        true,
+                        format!(
+                            "verified {} files and {} bytes",
+                            summary.files, summary.bytes
+                        ),
+                    )?;
+                    summary
+                }
+                Err(error) => {
+                    append_operation(
+                        &repo,
+                        OperationKind::Rehearse,
+                        Some(&snapshot),
+                        false,
+                        error.to_string(),
+                    )?;
+                    return Err(error.into());
+                }
+            };
             println!("Restore rehearsal completed.");
             println!("Snapshot ID:          {snapshot}");
             println!("Files verified:       {}", summary.files);
@@ -204,6 +228,20 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         Command::Check { repo } => {
             let report = check_repository(&repo);
             let passed = report.passed();
+            append_operation(
+                &repo,
+                OperationKind::Check,
+                None,
+                passed,
+                if passed {
+                    format!(
+                        "verified {} manifests and {} chunks",
+                        report.manifests_checked, report.chunks_verified
+                    )
+                } else {
+                    format!("{} integrity issue(s)", report.issues.len())
+                },
+            )?;
             if json {
                 let issues = report
                     .issues
@@ -351,6 +389,9 @@ pub fn error_code(error: &(dyn Error + 'static)) -> &'static str {
             BlameError::NoSnapshots | BlameError::SnapshotNotFound(_) => "snapshot_not_found",
             BlameError::Manifest(_) | BlameError::Accounting(_) => "blame_data_invalid",
         };
+    }
+    if error.downcast_ref::<HistoryError>().is_some() {
+        return "history_error";
     }
     if let Some(error) = error.downcast_ref::<RecoveryError>() {
         return match error {

@@ -16,6 +16,7 @@ mod check;
 mod chunk;
 mod diff;
 mod explain;
+mod history;
 mod manifest;
 mod recovery;
 mod restore;
@@ -33,6 +34,9 @@ pub use chunk::{
 };
 pub use diff::{DiffEntry, DiffError, SnapshotDiff, diff_snapshots};
 pub use explain::{ExplainError, ExplainReport, GrowthContributor, explain_snapshot};
+pub use history::{
+    HistoryError, OperationKind, OperationRecord, append_operation, read_operation_history,
+};
 pub use manifest::{
     FileEntry, FileType, ManifestError, ManifestSummary, SnapshotManifest, list_manifests,
     read_manifest, validate_manifest, verify_manifest_chunks, write_manifest,

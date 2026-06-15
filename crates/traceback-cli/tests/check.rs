@@ -155,6 +155,38 @@ fn check_reports_invalid_manifest() {
     assert!(stdout.contains("manifest is invalid"));
 }
 
+#[test]
+fn check_persists_success_and_failure_history() {
+    let (repository, _source, _temporary) = repository_with_backup();
+    assert!(
+        traceback()
+            .arg("check")
+            .arg("--repo")
+            .arg(&repository)
+            .status()
+            .expect("check should execute")
+            .success()
+    );
+    remove_first_chunk_file(&repository);
+    assert!(
+        !traceback()
+            .arg("check")
+            .arg("--repo")
+            .arg(&repository)
+            .status()
+            .expect("check should execute")
+            .success()
+    );
+
+    let records = read_history(&repository);
+
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["version"], 1);
+    assert_eq!(records[0]["operation"], "check");
+    assert_eq!(records[0]["success"], true);
+    assert_eq!(records[1]["success"], false);
+}
+
 fn repository_with_backup() -> (std::path::PathBuf, std::path::PathBuf, tempfile::TempDir) {
     let temporary = tempdir().expect("temporary directory should be created");
     let repository = temporary.path().join("repo");
@@ -209,4 +241,12 @@ fn first_chunk_file(repository: &std::path::Path) -> std::path::PathBuf {
         }
     }
     panic!("expected at least one chunk file");
+}
+
+fn read_history(repository: &std::path::Path) -> Vec<serde_json::Value> {
+    fs::read_to_string(repository.join("logs/operations-v1.jsonl"))
+        .expect("history should be readable")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("history line should be valid JSON"))
+        .collect()
 }
