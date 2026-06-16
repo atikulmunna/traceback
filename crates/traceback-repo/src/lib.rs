@@ -19,6 +19,7 @@ mod doctor;
 mod explain;
 mod history;
 mod ignore;
+mod maintenance;
 mod manifest;
 mod recovery;
 mod restore;
@@ -45,6 +46,10 @@ pub use history::{
 };
 pub use ignore::{
     ApplyIgnoreReport, IgnoreError, IgnoreSuggestion, apply_ignore_rules, suggest_ignores,
+};
+pub use maintenance::{
+    GcReport, MaintenanceError, OrphanedChunk, PrunePlan, gc_collect, gc_dry_run, prune_dry_run,
+    prune_snapshots,
 };
 pub use manifest::{
     FileEntry, FileType, ManifestError, ManifestSummary, SnapshotManifest, list_manifests,

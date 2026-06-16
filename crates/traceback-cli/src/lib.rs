@@ -6,11 +6,12 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
     BlameError, CheckIssue, ChunkError, DiffEntry, DiffError, DoctorError, DoctorReport,
     ExplainError, ExplainReport, FileEntry, FileType, FindingLevel, HistoryError, IgnoreError,
-    InitOutcome, ManifestError, ManifestSummary, OperationKind, RecoveryError, RepositoryError,
-    RestoreError, SnapshotDiff, SnapshotManifest, StorageBlameEntry, StorageBlameReport,
-    StoreChunkOutcome, acquire_writer_lock, append_operation, apply_ignore_rules, blame_snapshot,
-    check_repository, diff_snapshots, doctor_repository, explain_snapshot, init_repository,
-    list_manifests, recover_interrupted_writes, rehearse_restore, restore_snapshot,
+    InitOutcome, MaintenanceError, ManifestError, ManifestSummary, OperationKind, RecoveryError,
+    RepositoryError, RestoreError, SnapshotDiff, SnapshotManifest, StorageBlameEntry,
+    StorageBlameReport, StoreChunkOutcome, acquire_writer_lock, append_operation,
+    apply_ignore_rules, blame_snapshot, check_repository, diff_snapshots, doctor_repository,
+    explain_snapshot, gc_collect, gc_dry_run, init_repository, list_manifests, prune_dry_run,
+    prune_snapshots, recover_interrupted_writes, rehearse_restore, restore_snapshot,
     restore_snapshot_path, store_chunk, suggest_ignores, validate_repository, write_manifest,
 };
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
@@ -121,6 +122,38 @@ pub enum Command {
         /// Backup repository directory.
         #[arg(long)]
         repo: PathBuf,
+    },
+    /// Report or remove unreferenced chunk files.
+    Gc {
+        /// Backup repository directory.
+        #[arg(long)]
+        repo: PathBuf,
+
+        /// Report what would be removed without deleting chunk files.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Confirm deleting orphaned chunk files.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Plan or remove old snapshot manifests.
+    Prune {
+        /// Backup repository directory.
+        #[arg(long)]
+        repo: PathBuf,
+
+        /// Number of newest snapshots to retain.
+        #[arg(long, default_value_t = 1)]
+        keep_latest: usize,
+
+        /// Report what would be removed without deleting manifests.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Confirm deleting selected snapshot manifests.
+        #[arg(long)]
+        yes: bool,
     },
     /// Suggest or apply source ignore rules.
     Ignore {
@@ -370,6 +403,43 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 print_doctor_report(&report);
             }
         }
+        Command::Gc { repo, dry_run, yes } => {
+            if !dry_run && !yes {
+                return Err("gc requires --dry-run or --yes".into());
+            }
+            validate_repository(&repo)?;
+            let report = if yes {
+                gc_collect(&repo)?
+            } else {
+                gc_dry_run(&repo)?
+            };
+            if json {
+                print_json(&report)?;
+            } else {
+                print_gc_report(&report);
+            }
+        }
+        Command::Prune {
+            repo,
+            keep_latest,
+            dry_run,
+            yes,
+        } => {
+            if !dry_run && !yes {
+                return Err("prune requires --dry-run or --yes".into());
+            }
+            validate_repository(&repo)?;
+            let plan = if yes {
+                prune_snapshots(&repo, keep_latest)?
+            } else {
+                prune_dry_run(&repo, keep_latest)?
+            };
+            if json {
+                print_json(&plan)?;
+            } else {
+                print_prune_plan(&plan);
+            }
+        }
         Command::Ignore {
             command: IgnoreCommand::Suggest { path },
         } => {
@@ -518,6 +588,9 @@ pub fn error_code(error: &(dyn Error + 'static)) -> &'static str {
     }
     if error.downcast_ref::<IgnoreError>().is_some() {
         return "ignore_scan_failed";
+    }
+    if error.downcast_ref::<MaintenanceError>().is_some() {
+        return "maintenance_failed";
     }
     if let Some(error) = error.downcast_ref::<RecoveryError>() {
         return match error {
@@ -1203,6 +1276,39 @@ fn print_doctor_report(report: &DoctorReport) {
         if let Some(recommendation) = &finding.recommendation {
             println!("  Action: {recommendation}");
         }
+    }
+}
+
+fn print_gc_report(report: &traceback_repo::GcReport) {
+    println!(
+        "Garbage collection {}.",
+        if report.dry_run {
+            "dry run completed"
+        } else {
+            "completed"
+        }
+    );
+    println!("Orphaned chunks:      {}", report.orphaned_chunks.len());
+    println!("Reclaimable bytes:    {} B", report.reclaimable_bytes);
+    for chunk in &report.orphaned_chunks {
+        println!("O {} {} B", chunk.hash, chunk.bytes);
+    }
+}
+
+fn print_prune_plan(plan: &traceback_repo::PrunePlan) {
+    println!(
+        "Prune {}.",
+        if plan.dry_run {
+            "dry run completed"
+        } else {
+            "completed"
+        }
+    );
+    println!("Keep latest:          {}", plan.keep_latest);
+    println!("Snapshots retained:   {}", plan.retained_snapshots.len());
+    println!("Snapshots selected:   {}", plan.pruned_snapshots.len());
+    for snapshot in &plan.pruned_snapshots {
+        println!("P {snapshot}");
     }
 }
 
