@@ -8,11 +8,12 @@ use traceback_repo::{
     ExplainError, ExplainReport, FileEntry, FileType, FindingLevel, HistoryError, IgnoreError,
     InitOptions, InitOutcome, MaintenanceError, ManifestError, ManifestSummary, OperationKind,
     RecoveryError, RepositoryError, RestoreError, SnapshotDiff, SnapshotManifest,
-    StorageBlameEntry, StorageBlameReport, StoreChunkOutcome, acquire_writer_lock,
+    StorageBlameEntry, StorageBlameReport, StorageError, StoreChunkOutcome, acquire_writer_lock,
     append_operation, apply_ignore_rules, blame_snapshot, check_repository, diff_snapshots,
     doctor_repository, explain_snapshot, gc_collect, gc_dry_run, list_manifests, prune_dry_run,
     prune_snapshots, recover_interrupted_writes, rehearse_restore, restore_snapshot,
-    restore_snapshot_path, store_chunk, suggest_ignores, validate_repository, write_manifest,
+    restore_snapshot_path, store_chunk, suggest_ignores, sync_repository_to_filesystem_remote,
+    validate_repository, write_manifest,
 };
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
 use uuid::Uuid;
@@ -186,6 +187,11 @@ pub enum Command {
         #[command(subcommand)]
         command: IgnoreCommand,
     },
+    /// Push repository objects to a remote backend.
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -211,6 +217,20 @@ pub enum IgnoreCommand {
         /// Confirm writing the reviewed rules.
         #[arg(long)]
         yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RemoteCommand {
+    /// Push durable repository objects to a filesystem remote.
+    Push {
+        /// Backup repository directory.
+        #[arg(long)]
+        repo: PathBuf,
+
+        /// Filesystem remote path, optionally prefixed with file://.
+        #[arg(long)]
+        remote: String,
     },
 }
 
@@ -610,6 +630,25 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 }
             }
         }
+        Command::Remote {
+            command: RemoteCommand::Push { repo, remote },
+        } => {
+            validate_repository(&repo)?;
+            let remote = parse_filesystem_remote(&remote)?;
+            let report = sync_repository_to_filesystem_remote(&repo, &remote)?;
+            if json {
+                print_json(&report)?;
+            } else if !quiet {
+                println!("Remote push completed.");
+                if verbose {
+                    println!("Repository:           {}", repo.display());
+                    println!("Remote:               {}", remote.display());
+                }
+                println!("Copied files:         {}", report.copied_files);
+                println!("Skipped files:        {}", report.skipped_files);
+                println!("Copied bytes:         {} B", report.copied_bytes);
+            }
+        }
     }
 
     Ok(())
@@ -693,6 +732,13 @@ pub fn error_code(error: &(dyn Error + 'static)) -> &'static str {
         return match error {
             RecoveryError::Repository(_) => "recovery_repository_error",
             RecoveryError::Io { .. } => "recovery_io_error",
+        };
+    }
+    if let Some(error) = error.downcast_ref::<StorageError>() {
+        return match error {
+            StorageError::EscapesRoot(_) => "remote_path_invalid",
+            StorageError::ExistingObjectDiffers(_) => "remote_conflict",
+            StorageError::Io { .. } => "remote_io_error",
         };
     }
 
@@ -1388,6 +1434,19 @@ fn parse_restore_expression(snapshot: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((snapshot_id, selected_path))
+}
+
+fn parse_filesystem_remote(remote: &str) -> Result<PathBuf, Box<dyn Error>> {
+    if let Some(path) = remote.strip_prefix("file://") {
+        if path.is_empty() {
+            return Err("file remote path cannot be empty".into());
+        }
+        Ok(PathBuf::from(path))
+    } else if remote.contains("://") {
+        Err("only file:// remotes are supported in this release".into())
+    } else {
+        Ok(PathBuf::from(remote))
+    }
 }
 
 fn ignore_file_path(path: &std::path::Path) -> PathBuf {

@@ -60,7 +60,10 @@ pub use recovery::{RecoveryError, RecoveryReport, recover_interrupted_writes};
 pub use restore::{
     RestoreError, RestoreSummary, rehearse_restore, restore_snapshot, restore_snapshot_path,
 };
-pub use storage::{LocalRepositoryStorage, RepositoryStorage, StorageError, WriteOnceOutcome};
+pub use storage::{
+    LocalRepositoryStorage, RemoteSyncReport, RepositoryStorage, StorageError, WriteOnceOutcome,
+    sync_repository_to_filesystem_remote,
+};
 
 const CONFIG_FILE: &str = "config.toml";
 const FORMAT_VERSION: u32 = 0;

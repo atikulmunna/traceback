@@ -4,6 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -11,6 +12,8 @@ use uuid::Uuid;
 pub enum StorageError {
     #[error("storage path escapes repository root: {0}")]
     EscapesRoot(PathBuf),
+    #[error("remote object already exists with different contents: {0}")]
+    ExistingObjectDiffers(PathBuf),
     #[error("filesystem error at {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
 }
@@ -40,6 +43,13 @@ pub struct LocalRepositoryStorage {
     root: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RemoteSyncReport {
+    pub copied_files: usize,
+    pub skipped_files: usize,
+    pub copied_bytes: u64,
+}
+
 impl LocalRepositoryStorage {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -56,6 +66,24 @@ impl LocalRepositoryStorage {
 
         Ok(self.root.join(key))
     }
+}
+
+pub fn sync_repository_to_filesystem_remote(
+    repository: &Path,
+    remote: &Path,
+) -> Result<RemoteSyncReport, StorageError> {
+    let storage = LocalRepositoryStorage::new(remote);
+    let mut report = RemoteSyncReport {
+        copied_files: 0,
+        skipped_files: 0,
+        copied_bytes: 0,
+    };
+
+    copy_object(repository, &storage, Path::new("config.toml"), &mut report)?;
+    copy_tree(repository, &storage, Path::new("chunks"), &mut report)?;
+    copy_tree(repository, &storage, Path::new("snapshots"), &mut report)?;
+
+    Ok(report)
 }
 
 impl RepositoryStorage for LocalRepositoryStorage {
@@ -133,6 +161,76 @@ fn remove_temporary_file(path: &Path) -> Result<(), StorageError> {
     fs::remove_file(path).map_err(|source| io_error(path, source))
 }
 
+fn copy_tree(
+    repository: &Path,
+    storage: &LocalRepositoryStorage,
+    key: &Path,
+    report: &mut RemoteSyncReport,
+) -> Result<(), StorageError> {
+    let source = repository.join(key);
+    let entries = fs::read_dir(&source).map_err(|error| io_error(&source, error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| io_error(&source, error))?;
+        let file_name = entry.file_name();
+        let child_key = key.join(&file_name);
+        let file_type = entry
+            .file_type()
+            .map_err(|source| io_error(&entry.path(), source))?;
+        if file_type.is_dir() {
+            copy_tree(repository, storage, &child_key, report)?;
+        } else if file_type.is_file() && !is_temporary_object(&file_name.to_string_lossy()) {
+            copy_object(repository, storage, &child_key, report)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn copy_object(
+    repository: &Path,
+    storage: &LocalRepositoryStorage,
+    key: &Path,
+    report: &mut RemoteSyncReport,
+) -> Result<(), StorageError> {
+    let source = repository.join(key);
+    let contents = fs::read(&source).map_err(|error| io_error(&source, error))?;
+    if storage.exists(key)? {
+        if storage.read(key)? == contents {
+            report.skipped_files += 1;
+            return Ok(());
+        }
+        return Err(StorageError::ExistingObjectDiffers(
+            storage.absolute_path(key)?,
+        ));
+    }
+
+    let byte_count =
+        u64::try_from(contents.len()).expect("usize fits into u64 on supported targets");
+    let outcome = storage.write_once_verified(key, &contents, |path| {
+        let written = fs::read(path)?;
+        if written == contents {
+            Ok(())
+        } else {
+            Err(io::Error::other("written object did not verify"))
+        }
+    })?;
+    match outcome {
+        WriteOnceOutcome::Stored => {
+            report.copied_files += 1;
+            report.copied_bytes += byte_count;
+        }
+        WriteOnceOutcome::AlreadyExists => {
+            report.skipped_files += 1;
+        }
+    }
+
+    Ok(())
+}
+
+fn is_temporary_object(file_name: &str) -> bool {
+    file_name.starts_with(".tmp-") || file_name.ends_with(".tmp")
+}
+
 fn io_error(path: &Path, source: io::Error) -> StorageError {
     StorageError::Io {
         path: path.to_owned(),
@@ -146,7 +244,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{LocalRepositoryStorage, RepositoryStorage, StorageError, WriteOnceOutcome};
+    use super::{
+        LocalRepositoryStorage, RepositoryStorage, StorageError, WriteOnceOutcome,
+        sync_repository_to_filesystem_remote,
+    };
 
     #[test]
     fn write_once_verifies_and_publishes_local_object() {
@@ -200,5 +301,60 @@ mod tests {
             .expect_err("escaping path should fail");
 
         assert!(matches!(error, StorageError::EscapesRoot(_)));
+    }
+
+    #[test]
+    fn filesystem_remote_sync_copies_durable_repository_objects() {
+        let repository = tempdir().expect("repository root should be created");
+        let remote = tempdir().expect("remote root should be created");
+        std::fs::write(repository.path().join("config.toml"), "config")
+            .expect("config should be written");
+        std::fs::create_dir_all(repository.path().join("chunks/aa"))
+            .expect("chunk shard should be created");
+        std::fs::write(repository.path().join("chunks/aa/hash"), "chunk")
+            .expect("chunk should be written");
+        std::fs::write(
+            repository.path().join("chunks/aa/.tmp-leftover"),
+            "temporary",
+        )
+        .expect("temporary chunk should be written");
+        std::fs::create_dir_all(repository.path().join("snapshots"))
+            .expect("snapshots should be created");
+        std::fs::write(repository.path().join("snapshots/snap.json"), "snapshot")
+            .expect("snapshot should be written");
+
+        let report = sync_repository_to_filesystem_remote(repository.path(), remote.path())
+            .expect("sync should succeed");
+
+        assert_eq!(report.copied_files, 3);
+        assert_eq!(report.skipped_files, 0);
+        assert!(remote.path().join("config.toml").is_file());
+        assert!(remote.path().join("chunks/aa/hash").is_file());
+        assert!(!remote.path().join("chunks/aa/.tmp-leftover").exists());
+        assert!(remote.path().join("snapshots/snap.json").is_file());
+
+        let second = sync_repository_to_filesystem_remote(repository.path(), remote.path())
+            .expect("second sync should skip existing objects");
+        assert_eq!(second.copied_files, 0);
+        assert_eq!(second.skipped_files, 3);
+    }
+
+    #[test]
+    fn filesystem_remote_sync_rejects_conflicting_existing_object() {
+        let repository = tempdir().expect("repository root should be created");
+        let remote = tempdir().expect("remote root should be created");
+        std::fs::write(repository.path().join("config.toml"), "local")
+            .expect("config should be written");
+        std::fs::create_dir_all(repository.path().join("chunks"))
+            .expect("chunks should be created");
+        std::fs::create_dir_all(repository.path().join("snapshots"))
+            .expect("snapshots should be created");
+        std::fs::write(remote.path().join("config.toml"), "remote")
+            .expect("remote config should be written");
+
+        let error = sync_repository_to_filesystem_remote(repository.path(), remote.path())
+            .expect_err("conflicting remote object should fail");
+
+        assert!(matches!(error, StorageError::ExistingObjectDiffers(_)));
     }
 }
