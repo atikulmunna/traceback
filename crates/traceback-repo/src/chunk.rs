@@ -11,8 +11,6 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
 };
 use thiserror::Error;
-use uuid::Uuid;
-
 const CHUNK_MAGIC: &[u8; 8] = b"TBCHUNK\0";
 const ENCRYPTION_MAGIC: &[u8; 8] = b"TBENC01\0";
 const CHUNK_FORMAT_VERSION: u16 = 0;
@@ -20,6 +18,8 @@ const CHUNK_FLAGS: u16 = 0;
 const HEADER_SIZE: usize = 8 + 2 + 2 + 8 + 8;
 const XCHACHA_NONCE_SIZE: usize = 24;
 const COMPRESSION_LEVEL: i32 = 3;
+
+use crate::{LocalRepositoryStorage, RepositoryStorage, StorageError, WriteOnceOutcome};
 
 #[derive(Debug, Error)]
 pub enum ChunkError {
@@ -51,6 +51,8 @@ pub enum ChunkError {
     Encryption(String),
     #[error("decryption error at {path}: {message}")]
     Decryption { path: PathBuf, message: String },
+    #[error("{0}")]
+    Storage(#[from] StorageError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,9 +70,11 @@ pub enum StoreChunkOutcome {
 
 pub fn store_chunk(repository: &Path, content: &[u8]) -> Result<StoreChunkOutcome, ChunkError> {
     let hash = blake3::hash(content).to_hex().to_string();
-    let chunk_path = chunk_path(repository, &hash)?;
+    let storage = LocalRepositoryStorage::new(repository);
+    let chunk_key = chunk_key(&hash)?;
+    let chunk_path = storage.absolute_path(&chunk_key)?;
 
-    if chunk_path.exists() {
+    if storage.exists(&chunk_key)? {
         return Ok(StoreChunkOutcome::AlreadyExists(read_verified_metadata(
             &chunk_path,
             &hash,
@@ -89,37 +93,16 @@ pub fn store_chunk(repository: &Path, content: &[u8]) -> Result<StoreChunkOutcom
         stored_size,
     };
 
-    let parent = chunk_path
-        .parent()
-        .expect("chunk path always has a shard directory");
-    fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
-
-    let temporary_path = parent.join(format!(".tmp-{}", Uuid::new_v4().simple()));
-    write_chunk_file(&temporary_path, &metadata, &payload)?;
-    if let Err(error) = read_chunk_file(&temporary_path, &metadata.hash) {
-        let _ = fs::remove_file(&temporary_path);
-        return Err(error);
-    }
-
-    match fs::hard_link(&temporary_path, &chunk_path) {
-        Ok(()) => {
-            remove_temporary_file(&temporary_path)?;
-            Ok(StoreChunkOutcome::Stored(metadata))
-        }
-        Err(_) if chunk_path.exists() => {
-            remove_temporary_file(&temporary_path)?;
-            Ok(StoreChunkOutcome::AlreadyExists(read_verified_metadata(
-                &chunk_path,
-                &metadata.hash,
-            )?))
-        }
-        Err(_) => match fs::rename(&temporary_path, &chunk_path) {
-            Ok(()) => Ok(StoreChunkOutcome::Stored(metadata)),
-            Err(source) => {
-                let _ = fs::remove_file(&temporary_path);
-                Err(io_error(&chunk_path, source))
-            }
-        },
+    let chunk_file = encode_chunk_file(&metadata, &payload)?;
+    match storage.write_once_verified(&chunk_key, &chunk_file, |path| {
+        read_chunk_file(path, &metadata.hash)
+            .map(|_| ())
+            .map_err(io::Error::other)
+    })? {
+        WriteOnceOutcome::Stored => Ok(StoreChunkOutcome::Stored(metadata)),
+        WriteOnceOutcome::AlreadyExists => Ok(StoreChunkOutcome::AlreadyExists(
+            read_verified_metadata(&chunk_path, &metadata.hash)?,
+        )),
     }
 }
 
@@ -273,20 +256,16 @@ fn read_verified_metadata(path: &Path, hash: &str) -> Result<ChunkMetadata, Chun
     read_metadata(path, hash)
 }
 
-fn write_chunk_file(
-    path: &Path,
-    metadata: &ChunkMetadata,
-    payload: &[u8],
-) -> Result<(), ChunkError> {
-    let mut file = fs::File::create(path).map_err(|source| io_error(path, source))?;
+fn encode_chunk_file(metadata: &ChunkMetadata, payload: &[u8]) -> Result<Vec<u8>, ChunkError> {
+    let mut file = Vec::with_capacity(HEADER_SIZE + payload.len());
     file.write_all(CHUNK_MAGIC)
         .and_then(|()| file.write_all(&CHUNK_FORMAT_VERSION.to_le_bytes()))
         .and_then(|()| file.write_all(&CHUNK_FLAGS.to_le_bytes()))
         .and_then(|()| file.write_all(&metadata.raw_size.to_le_bytes()))
         .and_then(|()| file.write_all(&metadata.stored_size.to_le_bytes()))
         .and_then(|()| file.write_all(payload))
-        .and_then(|()| file.sync_all())
-        .map_err(|source| io_error(path, source))
+        .map_err(|source| io_error(Path::new("<chunk-buffer>"), source))?;
+    Ok(file)
 }
 
 fn decode_header<'a>(
@@ -359,6 +338,10 @@ fn read_u64(path: &Path, cursor: &mut Cursor<&[u8]>) -> Result<u64, ChunkError> 
 }
 
 pub(crate) fn chunk_path(repository: &Path, hash: &str) -> Result<PathBuf, ChunkError> {
+    Ok(repository.join(chunk_key(hash)?))
+}
+
+fn chunk_key(hash: &str) -> Result<PathBuf, ChunkError> {
     if hash.len() != 64
         || !hash
             .bytes()
@@ -367,11 +350,7 @@ pub(crate) fn chunk_path(repository: &Path, hash: &str) -> Result<PathBuf, Chunk
         return Err(ChunkError::InvalidHash(hash.to_owned()));
     }
 
-    Ok(repository.join("chunks").join(&hash[..2]).join(hash))
-}
-
-fn remove_temporary_file(path: &Path) -> Result<(), ChunkError> {
-    fs::remove_file(path).map_err(|source| io_error(path, source))
+    Ok(Path::new("chunks").join(&hash[..2]).join(hash))
 }
 
 fn io_error(path: &Path, source: io::Error) -> ChunkError {

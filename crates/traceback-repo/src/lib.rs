@@ -23,6 +23,7 @@ mod maintenance;
 mod manifest;
 mod recovery;
 mod restore;
+mod storage;
 
 pub use accounting::{
     AccountingError, ChunkFileReference, ChunkReference, ChunkReferenceReport,
@@ -59,6 +60,7 @@ pub use recovery::{RecoveryError, RecoveryReport, recover_interrupted_writes};
 pub use restore::{
     RestoreError, RestoreSummary, rehearse_restore, restore_snapshot, restore_snapshot_path,
 };
+pub use storage::{LocalRepositoryStorage, RepositoryStorage, StorageError, WriteOnceOutcome};
 
 const CONFIG_FILE: &str = "config.toml";
 const FORMAT_VERSION: u32 = 0;
