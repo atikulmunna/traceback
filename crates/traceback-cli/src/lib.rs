@@ -26,6 +26,18 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Suppress successful human-readable output.
+    #[arg(long, global = true, conflicts_with = "verbose")]
+    pub quiet: bool,
+
+    /// Include additional human-readable detail.
+    #[arg(long, global = true)]
+    pub verbose: bool,
+
+    /// Disable progress messages for CI logs.
+    #[arg(long, global = true)]
+    pub no_progress: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -196,6 +208,9 @@ pub enum IgnoreCommand {
 
 pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     let json = cli.json;
+    let quiet = cli.quiet;
+    let verbose = cli.verbose;
+    let progress = !cli.no_progress && !quiet && !json;
     match cli.command {
         Command::Init { repo } => match init_repository(&repo)? {
             InitOutcome::Created(config) => {
@@ -214,40 +229,72 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             }
         },
         Command::Backup { paths, repo } => {
+            emit_progress(progress, "scanning sources and writing snapshot");
+            let verbose_repo = repo.clone();
+            let verbose_sources = paths.clone();
             let result = run_backup(BackupRequest {
                 paths,
                 repo,
                 policy_ignore_patterns: Vec::new(),
                 fail_on_changed_file: false,
             })?;
-            println!("Backup completed.");
-            println!("Files scanned:        {}", result.files_scanned);
-            println!("Logical size:         {} B", result.logical_bytes);
-            println!("New data stored:      {} B", result.newly_stored_bytes);
-            println!("Ignored paths:        {}", result.ignored_count);
-            println!("Warnings:             {}", result.warning_count);
-            println!("Snapshot ID:          {}", result.snapshot_id);
+            if !quiet {
+                println!("Backup completed.");
+                if verbose {
+                    println!("Repository:           {}", verbose_repo.display());
+                    println!(
+                        "Sources:              {}",
+                        verbose_sources
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                println!("Files scanned:        {}", result.files_scanned);
+                println!("Logical size:         {} B", result.logical_bytes);
+                println!("New data stored:      {} B", result.newly_stored_bytes);
+                println!("Ignored paths:        {}", result.ignored_count);
+                println!("Warnings:             {}", result.warning_count);
+                println!("Snapshot ID:          {}", result.snapshot_id);
+            }
         }
         Command::Run { config } => {
             let policy = read_policy(&config)?;
             let retention_keep_latest = policy.retention_keep_latest;
+            emit_progress(progress, "running backup policy");
+            let verbose_repo = policy.backup.repository.clone();
+            let verbose_sources = policy.backup.sources.clone();
             let result = run_backup(BackupRequest {
                 paths: policy.backup.sources,
                 repo: policy.backup.repository,
                 policy_ignore_patterns: policy.ignore_patterns,
                 fail_on_changed_file: policy.fail_on_changed_file,
             })?;
-            println!("Policy backup completed.");
-            println!("Config:               {}", config.display());
-            println!("Files scanned:        {}", result.files_scanned);
-            println!("Logical size:         {} B", result.logical_bytes);
-            println!("New data stored:      {} B", result.newly_stored_bytes);
-            println!("Ignored paths:        {}", result.ignored_count);
-            println!("Warnings:             {}", result.warning_count);
-            if let Some(keep_latest) = retention_keep_latest {
-                println!("Retention keep latest: {keep_latest}");
+            if !quiet {
+                println!("Policy backup completed.");
+                println!("Config:               {}", config.display());
+                if verbose {
+                    println!("Repository:           {}", verbose_repo.display());
+                    println!(
+                        "Sources:              {}",
+                        verbose_sources
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                println!("Files scanned:        {}", result.files_scanned);
+                println!("Logical size:         {} B", result.logical_bytes);
+                println!("New data stored:      {} B", result.newly_stored_bytes);
+                println!("Ignored paths:        {}", result.ignored_count);
+                println!("Warnings:             {}", result.warning_count);
+                if let Some(keep_latest) = retention_keep_latest {
+                    println!("Retention keep latest: {keep_latest}");
+                }
+                println!("Snapshot ID:          {}", result.snapshot_id);
             }
-            println!("Snapshot ID:          {}", result.snapshot_id);
         }
         Command::Snapshots { repo } => {
             validate_repository(&repo)?;
@@ -833,6 +880,12 @@ impl From<&StorageBlameReport> for BlameJson {
 fn print_json(value: &impl Serialize) -> Result<(), serde_json::Error> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+fn emit_progress(enabled: bool, message: &str) {
+    if enabled {
+        println!("Progress: {message}...");
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

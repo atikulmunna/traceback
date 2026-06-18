@@ -39,6 +39,9 @@ run
 
 Repository initialization, verified local chunk storage, staged snapshot manifest publication, metadata-only filesystem scanning, streaming backup and restore, policy-based backup runs, writer locking, interrupted-write recovery, snapshot listing, full and selected-path restore, timestamp restoration, Unix permission preservation, portable path collision checks, symlink-safe restore containment, restore rehearsal, repository integrity checks with persisted check/rehearsal history, repository doctor findings with a capability-aware reliability score, smart ignore suggestions with reviewed non-destructive application, rich snapshot diffs, backup explanations, repository-wide chunk reference accounting, file/directory storage blame, garbage collection, and snapshot pruning are implemented.
 
+Human-readable commands support global `--quiet`, `--verbose`, and
+`--no-progress` output controls.
+
 `snapshots`, `check`, `diff`, `explain`, `blame-size`, `doctor`, `gc`, and `prune` support machine-readable output with the global
 `--json` flag:
 
