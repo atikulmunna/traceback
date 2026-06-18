@@ -1,7 +1,7 @@
-use std::{error::Error, fs, io::Read, path::PathBuf, time::SystemTime};
+use std::{env, error::Error, fs, io::Read, path::PathBuf, time::SystemTime};
 
 use clap::{Parser, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
     BlameError, CheckIssue, ChunkError, DiffEntry, DiffError, DoctorError, DoctorReport,
@@ -46,6 +46,12 @@ pub enum Command {
         /// Backup repository directory.
         #[arg(long)]
         repo: PathBuf,
+    },
+    /// Run a versioned backup policy file.
+    Run {
+        /// TOML policy file to execute.
+        #[arg(long, default_value = "traceback.toml")]
+        config: PathBuf,
     },
     /// List published snapshots.
     Snapshots {
@@ -208,13 +214,39 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             }
         },
         Command::Backup { paths, repo } => {
-            let result = run_backup(paths, repo)?;
+            let result = run_backup(BackupRequest {
+                paths,
+                repo,
+                policy_ignore_patterns: Vec::new(),
+                fail_on_changed_file: false,
+            })?;
             println!("Backup completed.");
             println!("Files scanned:        {}", result.files_scanned);
             println!("Logical size:         {} B", result.logical_bytes);
             println!("New data stored:      {} B", result.newly_stored_bytes);
             println!("Ignored paths:        {}", result.ignored_count);
             println!("Warnings:             {}", result.warning_count);
+            println!("Snapshot ID:          {}", result.snapshot_id);
+        }
+        Command::Run { config } => {
+            let policy = read_policy(&config)?;
+            let retention_keep_latest = policy.retention_keep_latest;
+            let result = run_backup(BackupRequest {
+                paths: policy.backup.sources,
+                repo: policy.backup.repository,
+                policy_ignore_patterns: policy.ignore_patterns,
+                fail_on_changed_file: policy.fail_on_changed_file,
+            })?;
+            println!("Policy backup completed.");
+            println!("Config:               {}", config.display());
+            println!("Files scanned:        {}", result.files_scanned);
+            println!("Logical size:         {} B", result.logical_bytes);
+            println!("New data stored:      {} B", result.newly_stored_bytes);
+            println!("Ignored paths:        {}", result.ignored_count);
+            println!("Warnings:             {}", result.warning_count);
+            if let Some(keep_latest) = retention_keep_latest {
+                println!("Retention keep latest: {keep_latest}");
+            }
             println!("Snapshot ID:          {}", result.snapshot_id);
         }
         Command::Snapshots { repo } => {
@@ -813,6 +845,141 @@ struct BackupResult {
     warning_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BackupRequest {
+    paths: Vec<PathBuf>,
+    repo: PathBuf,
+    policy_ignore_patterns: Vec<String>,
+    fail_on_changed_file: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedPolicy {
+    backup: PolicyBackup,
+    ignore_patterns: Vec<String>,
+    fail_on_changed_file: bool,
+    retention_keep_latest: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PolicyBackup {
+    sources: Vec<PathBuf>,
+    repository: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct PolicyToml {
+    version: u32,
+    backup: PolicyBackupToml,
+    #[serde(default)]
+    ignore: PolicyIgnoreToml,
+    #[serde(default)]
+    retention: PolicyRetentionToml,
+}
+
+#[derive(Debug, Deserialize)]
+struct PolicyBackupToml {
+    sources: Vec<String>,
+    repository: String,
+    #[serde(default)]
+    changing_file_policy: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PolicyIgnoreToml {
+    #[serde(default)]
+    patterns: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PolicyRetentionToml {
+    keep_latest: Option<usize>,
+}
+
+fn read_policy(path: &std::path::Path) -> Result<ResolvedPolicy, Box<dyn Error>> {
+    let contents = fs::read_to_string(path)?;
+    let policy: PolicyToml = toml::from_str(&contents)?;
+    if policy.version != 1 {
+        return Err(format!("policy version must be 1, found {}", policy.version).into());
+    }
+    if policy.backup.sources.is_empty() {
+        return Err("policy backup.sources must include at least one path".into());
+    }
+    if policy.backup.repository.trim().is_empty() {
+        return Err("policy backup.repository must not be empty".into());
+    }
+    let fail_on_changed_file = match policy
+        .backup
+        .changing_file_policy
+        .as_deref()
+        .unwrap_or("retry_then_warn")
+    {
+        "retry_then_warn" => false,
+        "fail_fast" => true,
+        other => {
+            return Err(format!(
+                "policy backup.changing_file_policy must be retry_then_warn or fail_fast, found {other}"
+            )
+            .into());
+        }
+    };
+    let sources = policy
+        .backup
+        .sources
+        .iter()
+        .map(|source| expand_policy_path(source))
+        .collect::<Result<Vec<_>, _>>()?;
+    for pattern in &policy.ignore.patterns {
+        if pattern.trim().is_empty() || pattern.contains('\0') {
+            return Err("policy ignore.patterns must not contain empty or NUL rules".into());
+        }
+    }
+    if policy.retention.keep_latest == Some(0) {
+        return Err("policy retention.keep_latest must be greater than zero".into());
+    }
+    Ok(ResolvedPolicy {
+        backup: PolicyBackup {
+            sources,
+            repository: expand_policy_path(&policy.backup.repository)?,
+        },
+        ignore_patterns: policy.ignore.patterns,
+        fail_on_changed_file,
+        retention_keep_latest: policy.retention.keep_latest,
+    })
+}
+
+fn expand_policy_path(path: &str) -> Result<PathBuf, Box<dyn Error>> {
+    let expanded = if path == "~" {
+        env::var("USERPROFILE")
+            .or_else(|_| env::var("HOME"))
+            .map_err(|_| "cannot expand ~ without USERPROFILE or HOME")?
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        let home = env::var("USERPROFILE")
+            .or_else(|_| env::var("HOME"))
+            .map_err(|_| "cannot expand ~ without USERPROFILE or HOME")?;
+        format!("{home}/{rest}")
+    } else if let Some(rest) = path.strip_prefix("${") {
+        let Some((name, suffix)) = rest.split_once('}') else {
+            return Err(format!("invalid environment expansion in path: {path}").into());
+        };
+        format!("{}{}", env::var(name)?, suffix)
+    } else if let Some(rest) = path.strip_prefix('$') {
+        let name_len = rest
+            .chars()
+            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if name_len == 0 {
+            return Err(format!("invalid environment expansion in path: {path}").into());
+        }
+        let (name, suffix) = rest.split_at(name_len);
+        format!("{}{}", env::var(name)?, suffix)
+    } else {
+        path.to_owned()
+    };
+    Ok(PathBuf::from(expanded))
+}
+
 struct StreamedFile {
     chunks: Vec<String>,
     newly_stored_bytes: u64,
@@ -820,10 +987,17 @@ struct StreamedFile {
     size: u64,
 }
 
-fn run_backup(paths: Vec<PathBuf>, repo: PathBuf) -> Result<BackupResult, Box<dyn Error>> {
+fn run_backup(request: BackupRequest) -> Result<BackupResult, Box<dyn Error>> {
+    let BackupRequest {
+        paths,
+        repo,
+        policy_ignore_patterns,
+        fail_on_changed_file,
+    } = request;
     let config = validate_repository(&repo)?;
     let _lock = acquire_writer_lock(&repo)?;
-    let ignore_patterns = read_ignore_patterns(&paths)?;
+    let mut ignore_patterns = read_ignore_patterns(&paths)?;
+    ignore_patterns.extend(policy_ignore_patterns);
     let mut options = ScanOptions::new(paths);
     options.repository = Some(repo.clone());
     options.ignore_patterns = ignore_patterns;
@@ -844,6 +1018,13 @@ fn run_backup(paths: Vec<PathBuf>, repo: PathBuf) -> Result<BackupResult, Box<dy
         let Some((file_entry, entry_newly_stored_bytes)) =
             build_file_entry(&repo, entry, config.chunk_size_bytes)?
         else {
+            if fail_on_changed_file {
+                return Err(format!(
+                    "file changed repeatedly during backup: {}",
+                    entry.path.display()
+                )
+                .into());
+            }
             warning_count += 1;
             continue;
         };
