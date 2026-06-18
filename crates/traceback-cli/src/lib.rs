@@ -6,11 +6,11 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use traceback_repo::{
     BlameError, CheckIssue, ChunkError, DiffEntry, DiffError, DoctorError, DoctorReport,
     ExplainError, ExplainReport, FileEntry, FileType, FindingLevel, HistoryError, IgnoreError,
-    InitOutcome, MaintenanceError, ManifestError, ManifestSummary, OperationKind, RecoveryError,
-    RepositoryError, RestoreError, SnapshotDiff, SnapshotManifest, StorageBlameEntry,
-    StorageBlameReport, StoreChunkOutcome, acquire_writer_lock, append_operation,
-    apply_ignore_rules, blame_snapshot, check_repository, diff_snapshots, doctor_repository,
-    explain_snapshot, gc_collect, gc_dry_run, init_repository, list_manifests, prune_dry_run,
+    InitOptions, InitOutcome, MaintenanceError, ManifestError, ManifestSummary, OperationKind,
+    RecoveryError, RepositoryError, RestoreError, SnapshotDiff, SnapshotManifest,
+    StorageBlameEntry, StorageBlameReport, StoreChunkOutcome, acquire_writer_lock,
+    append_operation, apply_ignore_rules, blame_snapshot, check_repository, diff_snapshots,
+    doctor_repository, explain_snapshot, gc_collect, gc_dry_run, list_manifests, prune_dry_run,
     prune_snapshots, recover_interrupted_writes, rehearse_restore, restore_snapshot,
     restore_snapshot_path, store_chunk, suggest_ignores, validate_repository, write_manifest,
 };
@@ -48,6 +48,14 @@ pub enum Command {
     Init {
         /// Repository directory to create.
         repo: PathBuf,
+
+        /// Create an encrypted repository.
+        #[arg(long)]
+        encrypted: bool,
+
+        /// Environment variable that supplies the repository passphrase.
+        #[arg(long, default_value = "TRACEBACK_PASSPHRASE")]
+        passphrase_env: String,
     },
     /// Create a snapshot from one or more source paths.
     Backup {
@@ -212,7 +220,17 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     let verbose = cli.verbose;
     let progress = !cli.no_progress && !quiet && !json;
     match cli.command {
-        Command::Init { repo } => match init_repository(&repo)? {
+        Command::Init {
+            repo,
+            encrypted,
+            passphrase_env,
+        } => match traceback_repo::init_repository_with_options(
+            &repo,
+            &InitOptions {
+                encrypted,
+                passphrase_env,
+            },
+        )? {
             InitOutcome::Created(config) => {
                 println!(
                     "Initialized TraceBack repository {} at {}",

@@ -127,6 +127,21 @@ pub enum InitOutcome {
     AlreadyInitialized(RepositoryConfig),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitOptions {
+    pub encrypted: bool,
+    pub passphrase_env: String,
+}
+
+impl Default for InitOptions {
+    fn default() -> Self {
+        Self {
+            encrypted: false,
+            passphrase_env: "TRACEBACK_PASSPHRASE".to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RepositoryConfig {
     pub repository_id: String,
@@ -138,10 +153,21 @@ pub struct RepositoryConfig {
     pub compression: String,
     pub compression_level: u8,
     pub encrypted: bool,
+    #[serde(default)]
+    pub encryption: Option<EncryptionConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct EncryptionConfig {
+    pub envelope_version: u32,
+    pub algorithm: String,
+    pub kdf: String,
+    pub salt_b64: String,
+    pub passphrase_env: String,
 }
 
 impl RepositoryConfig {
-    fn new() -> Result<Self, RepositoryError> {
+    fn new(options: &InitOptions) -> Result<Self, RepositoryError> {
         Ok(Self {
             repository_id: format!("repo_{}", Uuid::new_v4().simple()),
             format_version: FORMAT_VERSION,
@@ -151,12 +177,30 @@ impl RepositoryConfig {
             chunk_size_bytes: CHUNK_SIZE_BYTES,
             compression: "zstd".to_owned(),
             compression_level: 3,
-            encrypted: false,
+            encrypted: options.encrypted,
+            encryption: if options.encrypted {
+                Some(EncryptionConfig {
+                    envelope_version: 1,
+                    algorithm: "xchacha20poly1305".to_owned(),
+                    kdf: "argon2id".to_owned(),
+                    salt_b64: random_salt_b64(),
+                    passphrase_env: options.passphrase_env.clone(),
+                })
+            } else {
+                None
+            },
         })
     }
 }
 
 pub fn init_repository(path: &Path) -> Result<InitOutcome, RepositoryError> {
+    init_repository_with_options(path, &InitOptions::default())
+}
+
+pub fn init_repository_with_options(
+    path: &Path,
+    options: &InitOptions,
+) -> Result<InitOutcome, RepositoryError> {
     if path.exists() {
         if !path.is_dir() {
             return Err(RepositoryError::NotDirectory(path.to_owned()));
@@ -179,12 +223,20 @@ pub fn init_repository(path: &Path) -> Result<InitOutcome, RepositoryError> {
         fs::create_dir(&directory).map_err(|source| io_error(&directory, source))?;
     }
 
-    let config = RepositoryConfig::new()?;
+    let config = RepositoryConfig::new(options)?;
     let config_contents = toml::to_string_pretty(&config)?;
     let config_path = path.join(CONFIG_FILE);
     fs::write(&config_path, config_contents).map_err(|source| io_error(&config_path, source))?;
 
     Ok(InitOutcome::Created(config))
+}
+
+fn random_salt_b64() -> String {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let mut salt = [0_u8; 16];
+    getrandom::getrandom(&mut salt).expect("operating system randomness should be available");
+    STANDARD.encode(salt)
 }
 
 pub fn read_config(path: &Path) -> Result<RepositoryConfig, RepositoryError> {
@@ -322,10 +374,35 @@ fn validate_config(config: &RepositoryConfig) -> Result<(), RepositoryError> {
             "compression must be zstd".to_owned(),
         ));
     }
-    if config.encrypted {
-        return Err(RepositoryError::UnsupportedConfig(
-            "encrypted repositories are not supported yet".to_owned(),
-        ));
+    match (&config.encrypted, &config.encryption) {
+        (false, None) => {}
+        (true, Some(encryption)) => {
+            if encryption.envelope_version != 1 {
+                return Err(RepositoryError::UnsupportedConfig(
+                    "encryption envelope_version must be 1".to_owned(),
+                ));
+            }
+            if encryption.algorithm != "xchacha20poly1305" {
+                return Err(RepositoryError::UnsupportedConfig(
+                    "encryption algorithm must be xchacha20poly1305".to_owned(),
+                ));
+            }
+            if encryption.kdf != "argon2id" {
+                return Err(RepositoryError::UnsupportedConfig(
+                    "encryption kdf must be argon2id".to_owned(),
+                ));
+            }
+            if encryption.salt_b64.is_empty() || encryption.passphrase_env.is_empty() {
+                return Err(RepositoryError::UnsupportedConfig(
+                    "encryption salt_b64 and passphrase_env are required".to_owned(),
+                ));
+            }
+        }
+        _ => {
+            return Err(RepositoryError::UnsupportedConfig(
+                "encrypted repositories require encryption metadata".to_owned(),
+            ));
+        }
     }
 
     Ok(())

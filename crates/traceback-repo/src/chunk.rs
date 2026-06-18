@@ -1,16 +1,24 @@
 use std::{
-    fs,
+    env, fs,
     io::{self, Cursor, Read, Write},
     path::{Path, PathBuf},
 };
 
+use argon2::Argon2;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use chacha20poly1305::{
+    XChaCha20Poly1305, XNonce,
+    aead::{Aead, KeyInit, Payload},
+};
 use thiserror::Error;
 use uuid::Uuid;
 
 const CHUNK_MAGIC: &[u8; 8] = b"TBCHUNK\0";
+const ENCRYPTION_MAGIC: &[u8; 8] = b"TBENC01\0";
 const CHUNK_FORMAT_VERSION: u16 = 0;
 const CHUNK_FLAGS: u16 = 0;
 const HEADER_SIZE: usize = 8 + 2 + 2 + 8 + 8;
+const XCHACHA_NONCE_SIZE: usize = 24;
 const COMPRESSION_LEVEL: i32 = 3;
 
 #[derive(Debug, Error)]
@@ -39,6 +47,10 @@ pub enum ChunkError {
     Compression(io::Error),
     #[error("decompression error at {path}: {source}")]
     Decompression { path: PathBuf, source: io::Error },
+    #[error("encryption error: {0}")]
+    Encryption(String),
+    #[error("decryption error at {path}: {message}")]
+    Decryption { path: PathBuf, message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,8 +77,9 @@ pub fn store_chunk(repository: &Path, content: &[u8]) -> Result<StoreChunkOutcom
         )?));
     }
 
-    let payload =
+    let compressed =
         zstd::stream::encode_all(content, COMPRESSION_LEVEL).map_err(ChunkError::Compression)?;
+    let payload = maybe_encrypt_payload(repository, &hash, &compressed)?;
     let raw_size = u64::try_from(content.len()).expect("usize fits into u64 on supported targets");
     let stored_size =
         u64::try_from(payload.len()).expect("usize fits into u64 on supported targets");
@@ -123,11 +136,21 @@ pub fn read_chunk_metadata(repository: &Path, hash: &str) -> Result<ChunkMetadat
 fn read_chunk_file(path: &Path, hash: &str) -> Result<Vec<u8>, ChunkError> {
     let file = fs::read(path).map_err(|source| io_error(path, source))?;
     let (metadata, payload) = decode_header(path, hash, &file)?;
-    let content =
-        zstd::stream::decode_all(payload).map_err(|source| ChunkError::Decompression {
+    let payload = maybe_decrypt_payload(
+        path.parent()
+            .and_then(|path| path.parent())
+            .and_then(|path| path.parent())
+            .expect("chunk path has repository root"),
+        path,
+        hash,
+        payload,
+    )?;
+    let content = zstd::stream::decode_all(payload.as_slice()).map_err(|source| {
+        ChunkError::Decompression {
             path: path.to_owned(),
             source,
-        })?;
+        }
+    })?;
 
     if u64::try_from(content.len()).expect("usize fits into u64 on supported targets")
         != metadata.raw_size
@@ -145,6 +168,98 @@ fn read_chunk_file(path: &Path, hash: &str) -> Result<Vec<u8>, ChunkError> {
     }
 
     Ok(content)
+}
+
+fn maybe_encrypt_payload(
+    repository: &Path,
+    hash: &str,
+    payload: &[u8],
+) -> Result<Vec<u8>, ChunkError> {
+    let Some(cipher) = repository_cipher(repository)? else {
+        return Ok(payload.to_vec());
+    };
+    let mut nonce = [0_u8; XCHACHA_NONCE_SIZE];
+    getrandom::getrandom(&mut nonce)
+        .map_err(|source| ChunkError::Encryption(source.to_string()))?;
+    let ciphertext = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: payload,
+                aad: hash.as_bytes(),
+            },
+        )
+        .map_err(|source| ChunkError::Encryption(source.to_string()))?;
+    let mut encrypted = Vec::with_capacity(ENCRYPTION_MAGIC.len() + nonce.len() + ciphertext.len());
+    encrypted.extend_from_slice(ENCRYPTION_MAGIC);
+    encrypted.extend_from_slice(&nonce);
+    encrypted.extend_from_slice(&ciphertext);
+    Ok(encrypted)
+}
+
+fn maybe_decrypt_payload(
+    repository: &Path,
+    path: &Path,
+    hash: &str,
+    payload: &[u8],
+) -> Result<Vec<u8>, ChunkError> {
+    let Some(cipher) = repository_cipher(repository)? else {
+        return Ok(payload.to_vec());
+    };
+    if payload.len() < ENCRYPTION_MAGIC.len() + XCHACHA_NONCE_SIZE
+        || &payload[..ENCRYPTION_MAGIC.len()] != ENCRYPTION_MAGIC
+    {
+        return Err(ChunkError::Decryption {
+            path: path.to_owned(),
+            message: "encrypted repository chunk is missing encryption envelope".to_owned(),
+        });
+    }
+    let nonce_start = ENCRYPTION_MAGIC.len();
+    let ciphertext_start = nonce_start + XCHACHA_NONCE_SIZE;
+    cipher
+        .decrypt(
+            XNonce::from_slice(&payload[nonce_start..ciphertext_start]),
+            Payload {
+                msg: &payload[ciphertext_start..],
+                aad: hash.as_bytes(),
+            },
+        )
+        .map_err(|source| ChunkError::Decryption {
+            path: path.to_owned(),
+            message: source.to_string(),
+        })
+}
+
+fn repository_cipher(repository: &Path) -> Result<Option<XChaCha20Poly1305>, ChunkError> {
+    if !repository.join("config.toml").exists() {
+        return Ok(None);
+    }
+    let config = crate::read_config(repository).map_err(|source| {
+        ChunkError::Encryption(format!("repository config could not be read: {source}"))
+    })?;
+    if !config.encrypted {
+        return Ok(None);
+    }
+    let encryption = config
+        .encryption
+        .as_ref()
+        .ok_or_else(|| ChunkError::Encryption("missing encryption metadata".to_owned()))?;
+    let passphrase = env::var(&encryption.passphrase_env).map_err(|_| {
+        ChunkError::Encryption(format!(
+            "passphrase environment variable {} is not set",
+            encryption.passphrase_env
+        ))
+    })?;
+    let salt = STANDARD
+        .decode(&encryption.salt_b64)
+        .map_err(|source| ChunkError::Encryption(source.to_string()))?;
+    let mut key = [0_u8; 32];
+    Argon2::default()
+        .hash_password_into(passphrase.as_bytes(), &salt, &mut key)
+        .map_err(|source| ChunkError::Encryption(source.to_string()))?;
+    XChaCha20Poly1305::new_from_slice(&key)
+        .map(Some)
+        .map_err(|source| ChunkError::Encryption(source.to_string()))
 }
 
 fn read_metadata(path: &Path, hash: &str) -> Result<ChunkMetadata, ChunkError> {
