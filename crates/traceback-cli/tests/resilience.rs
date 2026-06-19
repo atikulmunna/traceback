@@ -109,7 +109,10 @@ fn backup_recovers_stale_writer_lock_before_writing() {
     );
     fs::write(
         repository.join("locks/writer.lock"),
-        r#"{"pid":999999,"created_at":"2026-01-01T00:00:00Z"}"#,
+        format!(
+            r#"{{"pid":{},"created_at":"2026-01-01T00:00:00Z"}}"#,
+            exited_child_pid()
+        ),
     )
     .expect("stale lock should be written");
 
@@ -124,4 +127,25 @@ fn backup_recovers_stale_writer_lock_before_writing() {
     assert!(backup.status.success());
     assert!(String::from_utf8_lossy(&backup.stdout).contains("Backup completed."));
     assert!(!repository.join("locks/writer.lock").exists());
+}
+
+fn exited_child_pid() -> u32 {
+    let mut child = short_lived_command()
+        .spawn()
+        .expect("short-lived child should spawn");
+    let pid = child.id();
+    child.wait().expect("short-lived child should exit");
+    pid
+}
+
+#[cfg(windows)]
+fn short_lived_command() -> Command {
+    let mut command = Command::new("cmd");
+    command.args(["/C", "exit", "0"]);
+    command
+}
+
+#[cfg(unix)]
+fn short_lived_command() -> Command {
+    Command::new("true")
 }

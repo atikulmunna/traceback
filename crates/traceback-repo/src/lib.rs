@@ -431,7 +431,7 @@ fn io_error(path: &Path, source: io::Error) -> RepositoryError {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, process::Command};
 
     use tempfile::tempdir;
 
@@ -587,7 +587,7 @@ mod tests {
         fs::write(
             &lock_path,
             serde_json::to_vec(&WriterLockMetadata {
-                pid: u32::MAX,
+                pid: exited_child_pid(),
                 created_at: "2026-06-13T00:00:00Z".to_owned(),
             })
             .expect("metadata should serialize"),
@@ -625,5 +625,26 @@ mod tests {
         let recovery = recover_stale_writer_lock(&repository).expect("absence should be safe");
 
         assert_eq!(recovery, WriterLockRecovery::NoLock);
+    }
+
+    fn exited_child_pid() -> u32 {
+        let mut child = short_lived_command()
+            .spawn()
+            .expect("short-lived child should spawn");
+        let pid = child.id();
+        child.wait().expect("short-lived child should exit");
+        pid
+    }
+
+    #[cfg(windows)]
+    fn short_lived_command() -> Command {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "exit", "0"]);
+        command
+    }
+
+    #[cfg(unix)]
+    fn short_lived_command() -> Command {
+        Command::new("true")
     }
 }
