@@ -84,9 +84,11 @@ Repository initialization, optional encrypted chunk storage, verified local chun
 The terminal browser validates a repository and opens a read-only snapshot
 timeline with a file list for the selected snapshot. Use `Tab` to switch focus,
 `Up`/`Down` or `j`/`k` to move, `Home`/`End` to jump, `/` to filter snapshot
-paths, `c` to clear the file filter, `?` for help, and `q`/`Esc` to quit. The
-detail panel shows selected snapshot metadata plus selected file type, size,
-content hash, and chunk references:
+paths, `c` to clear the file filter, `r` to preview a restore command, `?` for
+help, and `q`/`Esc` to quit. Restore previews require confirmation and do not
+write files from the TUI. The detail panel shows selected snapshot metadata plus
+selected file type, size, content hash, chunk references, and the prepared
+restore target/command:
 
 ```text
 traceback tui --repo ./my-backups
