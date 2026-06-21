@@ -13,7 +13,7 @@ It aims to create deduplicated snapshots while making backup behavior easy to in
 - Smart ignore suggestions
 - Repository health reports
 - Optional encryption, filesystem remote push, and pruning
-- Terminal UI scaffold, with snapshot browsing planned next
+- Terminal UI snapshot browser, with snapshot details planned next
 
 ## Install
 
@@ -79,10 +79,11 @@ remote push
 tui
 ```
 
-Repository initialization, optional encrypted chunk storage, verified local chunk storage behind a storage abstraction, filesystem remote push, staged snapshot manifest publication, metadata-only filesystem scanning, streaming backup and restore, policy-based backup runs, writer locking, interrupted-write recovery, resilience coverage for stale locks and maintenance contention, snapshot listing, full and selected-path restore, timestamp restoration, Unix permission preservation, portable path collision checks, symlink-safe restore containment, restore rehearsal, repository integrity checks with persisted check/rehearsal history, repository doctor findings with a capability-aware reliability score, smart ignore suggestions with reviewed non-destructive application, rich snapshot diffs, backup explanations, repository-wide chunk reference accounting, file/directory storage blame, garbage collection, snapshot pruning, and a minimal terminal UI scaffold are implemented.
+Repository initialization, optional encrypted chunk storage, verified local chunk storage behind a storage abstraction, filesystem remote push, staged snapshot manifest publication, metadata-only filesystem scanning, streaming backup and restore, policy-based backup runs, writer locking, interrupted-write recovery, resilience coverage for stale locks and maintenance contention, snapshot listing, full and selected-path restore, timestamp restoration, Unix permission preservation, portable path collision checks, symlink-safe restore containment, restore rehearsal, repository integrity checks with persisted check/rehearsal history, repository doctor findings with a capability-aware reliability score, smart ignore suggestions with reviewed non-destructive application, rich snapshot diffs, backup explanations, repository-wide chunk reference accounting, file/directory storage blame, garbage collection, snapshot pruning, and a terminal snapshot browser are implemented.
 
-The terminal browser validates a repository and opens a read-only overview
-screen:
+The terminal browser validates a repository and opens a read-only snapshot
+timeline. Use `Up`/`Down` or `j`/`k` to move, `Home`/`End` to jump, `?` for
+help, and `q`/`Esc` to quit:
 
 ```text
 traceback tui --repo ./my-backups
