@@ -801,6 +801,24 @@ mod tests {
     }
 
     #[test]
+    fn filter_mode_captures_quit_keys_until_filtering_stops() {
+        let mut app = app_with_snapshots(1);
+
+        press_keys(&mut app, [KeyCode::Char('/'), KeyCode::Char('q')]);
+
+        assert!(!app.should_quit());
+        assert_eq!(app.file_filter, "q");
+        assert_eq!(
+            app.help_text(),
+            "Type path filter | Enter accept | Backspace edit | Esc stop filtering"
+        );
+
+        press_keys(&mut app, [KeyCode::Esc, KeyCode::Char('q')]);
+
+        assert!(app.should_quit());
+    }
+
+    #[test]
     fn navigation_selects_snapshots_without_leaving_bounds() {
         let mut app = app_with_snapshots(3);
 
@@ -919,6 +937,17 @@ mod tests {
     }
 
     #[test]
+    fn restore_preview_does_not_prepare_without_snapshots() {
+        let mut app = app_with_snapshots(0);
+
+        app.handle_key(KeyCode::Char('r'));
+
+        assert!(app.restore_plan.is_none());
+        assert_eq!(app.restore_confirmation, RestoreConfirmation::None);
+        assert_eq!(app.selected_snapshot_id(), None);
+    }
+
+    #[test]
     fn file_restore_preview_uses_selected_path_and_clear_target() {
         let mut app = app_with_snapshots(1);
 
@@ -951,21 +980,43 @@ mod tests {
     }
 
     #[test]
+    fn restore_confirmation_blocks_navigation_until_cancelled() {
+        let mut app = app_with_snapshots(2);
+
+        press_keys(&mut app, [KeyCode::Char('r'), KeyCode::Down]);
+
+        assert_eq!(app.selected_snapshot_id(), Some("snap_001"));
+        assert_eq!(app.restore_confirmation, RestoreConfirmation::Awaiting);
+
+        press_keys(&mut app, [KeyCode::Char('n'), KeyCode::Down]);
+
+        assert_eq!(app.selected_snapshot_id(), Some("snap_002"));
+        assert!(app.restore_plan.is_none());
+        assert_eq!(app.restore_confirmation, RestoreConfirmation::None);
+    }
+
+    #[test]
+    fn changing_selection_clears_confirmed_restore_preview() {
+        let mut app = app_with_snapshots(2);
+
+        press_keys(
+            &mut app,
+            [KeyCode::Char('r'), KeyCode::Char('y'), KeyCode::Down],
+        );
+
+        assert_eq!(app.selected_snapshot_id(), Some("snap_002"));
+        assert!(app.restore_plan.is_none());
+        assert_eq!(app.restore_confirmation, RestoreConfirmation::None);
+    }
+
+    #[test]
     fn render_snapshot_browser_includes_selection_and_snapshot_fields() {
         let mut app = app_with_snapshots(2);
         app.handle_key(KeyCode::Down);
         let backend = TestBackend::new(130, 20);
         let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
 
-        terminal
-            .draw(|frame| render(frame, &app))
-            .expect("frame should render");
-        let buffer = terminal.backend().buffer();
-        let rendered = buffer
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
+        let rendered = render_to_string(&mut terminal, &app);
 
         assert!(rendered.contains("TraceBack terminal browser"));
         assert!(rendered.contains("repo_test"));
@@ -983,16 +1034,7 @@ mod tests {
         let backend = TestBackend::new(110, 30);
         let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
 
-        terminal
-            .draw(|frame| render(frame, &app))
-            .expect("frame should render");
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
+        let rendered = render_to_string(&mut terminal, &app);
 
         assert!(rendered.contains("Snapshot Details"));
         assert!(rendered.contains("ID: snap_002"));
@@ -1013,16 +1055,7 @@ mod tests {
         let backend = TestBackend::new(150, 36);
         let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
 
-        terminal
-            .draw(|frame| render(frame, &app))
-            .expect("frame should render");
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
+        let rendered = render_to_string(&mut terminal, &app);
 
         assert!(rendered.contains("Files *"));
         assert!(rendered.contains("> file"));
@@ -1040,16 +1073,7 @@ mod tests {
         let backend = TestBackend::new(170, 42);
         let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
 
-        terminal
-            .draw(|frame| render(frame, &app))
-            .expect("frame should render");
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
+        let rendered = render_to_string(&mut terminal, &app);
 
         assert!(rendered.contains("Restore preview:"));
         assert!(rendered.contains("Status: awaiting confirmation"));
@@ -1083,6 +1107,48 @@ mod tests {
             .expect_err("missing repository should fail");
 
         assert!(error.to_string().contains("config"));
+    }
+
+    #[test]
+    fn restore_command_quotes_paths_with_spaces() {
+        let app = TuiApp::new(
+            PathBuf::from("./repo with spaces"),
+            config(),
+            vec![manifest(1)],
+        );
+
+        let plan = app
+            .build_restore_plan()
+            .expect("snapshot restore plan should build");
+
+        assert_eq!(
+            plan.command,
+            format!(
+                "traceback restore snap_001 --repo \"./repo with spaces\" --target {}",
+                PathBuf::from("traceback-restore")
+                    .join("snap_001")
+                    .display()
+            )
+        );
+    }
+
+    fn press_keys<const N: usize>(app: &mut TuiApp, keys: [KeyCode; N]) {
+        for key in keys {
+            app.handle_key(key);
+        }
+    }
+
+    fn render_to_string(terminal: &mut Terminal<TestBackend>, app: &TuiApp) -> String {
+        terminal
+            .draw(|frame| render(frame, app))
+            .expect("frame should render");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
     }
 
     fn app_with_snapshots(count: usize) -> TuiApp {

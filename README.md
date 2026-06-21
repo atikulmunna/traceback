@@ -82,16 +82,32 @@ tui
 Repository initialization, optional encrypted chunk storage, verified local chunk storage behind a storage abstraction, filesystem remote push, staged snapshot manifest publication, metadata-only filesystem scanning, streaming backup and restore, policy-based backup runs, writer locking, interrupted-write recovery, resilience coverage for stale locks and maintenance contention, snapshot listing, full and selected-path restore, timestamp restoration, Unix permission preservation, portable path collision checks, symlink-safe restore containment, restore rehearsal, repository integrity checks with persisted check/rehearsal history, repository doctor findings with a capability-aware reliability score, smart ignore suggestions with reviewed non-destructive application, rich snapshot diffs, backup explanations, repository-wide chunk reference accounting, file/directory storage blame, garbage collection, snapshot pruning, and a terminal snapshot/file browser with detail inspection are implemented.
 
 The terminal browser validates a repository and opens a read-only snapshot
-timeline with a file list for the selected snapshot. Use `Tab` to switch focus,
-`Up`/`Down` or `j`/`k` to move, `Home`/`End` to jump, `/` to filter snapshot
-paths, `c` to clear the file filter, `r` to preview a restore command, `?` for
-help, and `q`/`Esc` to quit. Restore previews require confirmation and do not
-write files from the TUI. The detail panel shows selected snapshot metadata plus
-selected file type, size, content hash, chunk references, and the prepared
-restore target/command:
+timeline with a file list for the selected snapshot:
 
 ```text
 traceback tui --repo ./my-backups
+```
+
+The TUI shows three panels: snapshots, files in the selected snapshot, and
+details for the selected snapshot or file. Restore support is intentionally a
+preview step: it prepares a normal `traceback restore ...` command and requires
+confirmation, but it does not write files from inside the TUI.
+
+TUI keybindings:
+
+```text
+Tab             switch focus between snapshots and files
+Up/Down, j/k    move within the focused panel
+Home/End        jump to the first or last item in the focused panel
+/               start filtering file paths
+Enter           accept the current file filter
+Esc             stop filtering, cancel restore preview, or quit
+c               clear the file filter while the file panel is focused
+r               preview a restore command for the focused snapshot/file
+y               confirm restore command preparation
+n               cancel or clear a restore preview
+? or F1         show or hide help
+q               quit
 ```
 
 Human-readable commands support global `--quiet`, `--verbose`, and
