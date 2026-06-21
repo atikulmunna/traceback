@@ -30,8 +30,18 @@ pub struct TuiApp {
     repository_id: String,
     snapshots: Vec<SnapshotRow>,
     selected_snapshot: usize,
+    selected_file: usize,
+    focus: TuiFocus,
+    file_filter: String,
+    filtering_files: bool,
     show_help: bool,
     should_quit: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiFocus {
+    Snapshots,
+    Files,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +58,17 @@ struct SnapshotRow {
     newly_stored_bytes: u64,
     chunk_references: usize,
     unique_chunks: usize,
+    entries: Vec<FileRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileRow {
+    path: String,
+    file_type: FileType,
+    size: u64,
+    content_hash: Option<String>,
+    chunks: Vec<String>,
+    symlink_target: Option<String>,
 }
 
 impl TuiApp {
@@ -62,19 +83,54 @@ impl TuiApp {
             repository_id: config.repository_id,
             snapshots,
             selected_snapshot: 0,
+            selected_file: 0,
+            focus: TuiFocus::Snapshots,
+            file_filter: String::new(),
+            filtering_files: false,
             show_help: true,
             should_quit: false,
         }
     }
 
     fn handle_key(&mut self, code: KeyCode) {
+        if self.filtering_files {
+            self.handle_filter_key(code);
+            return;
+        }
+
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Char('?') | KeyCode::F(1) => self.show_help = !self.show_help,
-            KeyCode::Down | KeyCode::Char('j') => self.select_next_snapshot(),
-            KeyCode::Up | KeyCode::Char('k') => self.select_previous_snapshot(),
-            KeyCode::Home => self.select_first_snapshot(),
-            KeyCode::End => self.select_last_snapshot(),
+            KeyCode::Tab => self.toggle_focus(),
+            KeyCode::Char('/') => {
+                self.focus = TuiFocus::Files;
+                self.filtering_files = true;
+                self.file_filter.clear();
+                self.selected_file = 0;
+            }
+            KeyCode::Char('c') if self.focus == TuiFocus::Files => {
+                self.file_filter.clear();
+                self.selected_file = 0;
+            }
+            KeyCode::Down | KeyCode::Char('j') => self.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.select_previous(),
+            KeyCode::Home => self.select_first(),
+            KeyCode::End => self.select_last(),
+            _ => {}
+        }
+    }
+
+    fn handle_filter_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc | KeyCode::Enter => self.filtering_files = false,
+            KeyCode::Backspace => {
+                self.file_filter.pop();
+                self.selected_file = 0;
+            }
+            KeyCode::Char(character) if !character.is_control() => {
+                self.file_filter.push(character);
+                self.selected_file = 0;
+            }
             _ => {}
         }
     }
@@ -83,11 +139,16 @@ impl TuiApp {
         self.should_quit
     }
 
-    fn help_text(&self) -> &'static str {
+    fn help_text(&self) -> String {
+        if self.filtering_files {
+            return "Type path filter | Enter accept | Backspace edit | Esc stop filtering"
+                .to_owned();
+        }
+
         if self.show_help {
-            "Up/Down or j/k move | Home/End jump | q/Esc quit | ?/F1 hide help"
+            "Tab focus | Up/Down or j/k move | Home/End jump | / filter files | c clear filter | q/Esc quit | ?/F1 hide help".to_owned()
         } else {
-            "?/F1 help | q/Esc quit"
+            "?/F1 help | q/Esc quit".to_owned()
         }
     }
 
@@ -105,23 +166,106 @@ impl TuiApp {
         self.snapshots.get(self.selected_snapshot)
     }
 
+    fn selected_file(&self) -> Option<&FileRow> {
+        self.filtered_files().get(self.selected_file).copied()
+    }
+
+    fn filtered_file_count(&self) -> usize {
+        self.filtered_files().len()
+    }
+
+    fn filtered_files(&self) -> Vec<&FileRow> {
+        let Some(snapshot) = self.selected_snapshot() else {
+            return Vec::new();
+        };
+
+        let filter = self.file_filter.to_lowercase();
+        snapshot
+            .entries
+            .iter()
+            .filter(|entry| filter.is_empty() || entry.path.to_lowercase().contains(&filter))
+            .collect()
+    }
+
+    fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            TuiFocus::Snapshots => TuiFocus::Files,
+            TuiFocus::Files => TuiFocus::Snapshots,
+        };
+    }
+
+    fn select_next(&mut self) {
+        match self.focus {
+            TuiFocus::Snapshots => self.select_next_snapshot(),
+            TuiFocus::Files => self.select_next_file(),
+        }
+    }
+
+    fn select_previous(&mut self) {
+        match self.focus {
+            TuiFocus::Snapshots => self.select_previous_snapshot(),
+            TuiFocus::Files => self.select_previous_file(),
+        }
+    }
+
+    fn select_first(&mut self) {
+        match self.focus {
+            TuiFocus::Snapshots => self.select_first_snapshot(),
+            TuiFocus::Files => self.select_first_file(),
+        }
+    }
+
+    fn select_last(&mut self) {
+        match self.focus {
+            TuiFocus::Snapshots => self.select_last_snapshot(),
+            TuiFocus::Files => self.select_last_file(),
+        }
+    }
+
     fn select_next_snapshot(&mut self) {
         if self.selected_snapshot + 1 < self.snapshots.len() {
             self.selected_snapshot += 1;
+            self.selected_file = 0;
         }
     }
 
     fn select_previous_snapshot(&mut self) {
+        let previous = self.selected_snapshot;
         self.selected_snapshot = self.selected_snapshot.saturating_sub(1);
+        if self.selected_snapshot != previous {
+            self.selected_file = 0;
+        }
     }
 
     fn select_first_snapshot(&mut self) {
         self.selected_snapshot = 0;
+        self.selected_file = 0;
     }
 
     fn select_last_snapshot(&mut self) {
         if let Some(last) = self.snapshots.len().checked_sub(1) {
             self.selected_snapshot = last;
+            self.selected_file = 0;
+        }
+    }
+
+    fn select_next_file(&mut self) {
+        if self.selected_file + 1 < self.filtered_file_count() {
+            self.selected_file += 1;
+        }
+    }
+
+    fn select_previous_file(&mut self) {
+        self.selected_file = self.selected_file.saturating_sub(1);
+    }
+
+    fn select_first_file(&mut self) {
+        self.selected_file = 0;
+    }
+
+    fn select_last_file(&mut self) {
+        if let Some(last) = self.filtered_file_count().checked_sub(1) {
+            self.selected_file = last;
         }
     }
 }
@@ -163,6 +307,20 @@ impl From<SnapshotManifest> for SnapshotRow {
             newly_stored_bytes: manifest.summary.newly_stored_bytes,
             chunk_references,
             unique_chunks,
+            entries: manifest.files.into_iter().map(FileRow::from).collect(),
+        }
+    }
+}
+
+impl From<traceback_repo::FileEntry> for FileRow {
+    fn from(entry: traceback_repo::FileEntry) -> Self {
+        Self {
+            path: entry.path,
+            file_type: entry.file_type,
+            size: entry.size,
+            content_hash: entry.content_hash,
+            chunks: entry.chunks,
+            symlink_target: entry.symlink_target,
         }
     }
 }
@@ -252,13 +410,30 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
 
     let browser = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .constraints([
+            Constraint::Percentage(36),
+            Constraint::Percentage(34),
+            Constraint::Percentage(30),
+        ])
         .split(chunks[2]);
 
     let snapshots = Paragraph::new(snapshot_lines(app))
         .wrap(Wrap { trim: false })
-        .block(Block::default().title("Snapshots").borders(Borders::ALL));
+        .block(
+            Block::default()
+                .title(focused_title("Snapshots", app.focus == TuiFocus::Snapshots))
+                .borders(Borders::ALL),
+        );
     frame.render_widget(snapshots, browser[0]);
+
+    let files = Paragraph::new(file_lines(app))
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .title(file_browser_title(app))
+                .borders(Borders::ALL),
+        );
+    frame.render_widget(files, browser[1]);
 
     let details = Paragraph::new(snapshot_detail_lines(app))
         .wrap(Wrap { trim: true })
@@ -267,12 +442,29 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
                 .title("Snapshot Details")
                 .borders(Borders::ALL),
         );
-    frame.render_widget(details, browser[1]);
+    frame.render_widget(details, browser[2]);
 
     let footer = Paragraph::new(app.help_text())
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL));
     frame.render_widget(footer, chunks[3]);
+}
+
+fn focused_title(title: &str, focused: bool) -> String {
+    if focused {
+        format!("{title} *")
+    } else {
+        title.to_owned()
+    }
+}
+
+fn file_browser_title(app: &TuiApp) -> String {
+    let title = focused_title("Files", app.focus == TuiFocus::Files);
+    if app.file_filter.is_empty() {
+        return title;
+    }
+
+    format!("{title} | filter: {}", app.file_filter)
 }
 
 fn snapshot_detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
@@ -283,7 +475,7 @@ fn snapshot_detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
         ];
     };
 
-    vec![
+    let mut lines = vec![
         Line::from(format!("ID: {}", snapshot.snapshot_id)),
         Line::from(format!(
             "Created: {}",
@@ -302,7 +494,39 @@ fn snapshot_detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
         Line::from(format!("Chunk refs: {}", snapshot.chunk_references)),
         Line::from(format!("Unique chunks: {}", snapshot.unique_chunks)),
         Line::from("Warnings: none recorded"),
-    ]
+        Line::from(""),
+    ];
+
+    if let Some(file) = app.selected_file() {
+        lines.extend([
+            Line::from("Selected entry:"),
+            Line::from(format!("Path: {}", file.path)),
+            Line::from(format!("Type: {}", display_file_type(file.file_type))),
+            Line::from(format!("Size: {} B", file.size)),
+            Line::from(format!(
+                "Content hash: {}",
+                file.content_hash.as_deref().unwrap_or("<none>")
+            )),
+            Line::from(format!("Chunks: {}", file.chunks.len())),
+            Line::from(format!(
+                "First chunk: {}",
+                file.chunks
+                    .first()
+                    .map(|chunk| abbreviate(chunk, 16))
+                    .unwrap_or_else(|| "<none>".to_owned())
+            )),
+        ]);
+
+        if let Some(target) = &file.symlink_target {
+            lines.push(Line::from(format!("Symlink target: {target}")));
+        }
+    } else if !app.file_filter.is_empty() {
+        lines.push(Line::from("No file matches the current filter."));
+    } else {
+        lines.push(Line::from("No file selected."));
+    }
+
+    lines
 }
 
 fn snapshot_lines(app: &TuiApp) -> Vec<Line<'static>> {
@@ -329,6 +553,49 @@ fn snapshot_lines(app: &TuiApp) -> Vec<Line<'static>> {
             ))
         })
         .collect()
+}
+
+fn file_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    let files = app.filtered_files();
+    if files.is_empty() {
+        if app.file_filter.is_empty() {
+            return vec![Line::from("No file entries in this snapshot.")];
+        }
+
+        return vec![Line::from("No file entries match the current filter.")];
+    }
+
+    files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| {
+            let marker = if index == app.selected_file { ">" } else { " " };
+            Line::from(format!(
+                "{marker} {:<4} {:>8} B  {}",
+                display_file_type(file.file_type),
+                file.size,
+                file.path
+            ))
+        })
+        .collect()
+}
+
+fn display_file_type(file_type: FileType) -> &'static str {
+    match file_type {
+        FileType::File => "file",
+        FileType::Directory => "dir",
+        FileType::Symlink => "link",
+    }
+}
+
+fn abbreviate(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let abbreviated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{abbreviated}...")
+    } else {
+        abbreviated
+    }
 }
 
 fn display_created_at(timestamp: &str) -> String {
@@ -363,7 +630,7 @@ mod tests {
         assert!(!app.should_quit());
         assert_eq!(
             app.help_text(),
-            "Up/Down or j/k move | Home/End jump | q/Esc quit | ?/F1 hide help"
+            "Tab focus | Up/Down or j/k move | Home/End jump | / filter files | c clear filter | q/Esc quit | ?/F1 hide help"
         );
 
         app.handle_key(KeyCode::Char('?'));
@@ -409,10 +676,56 @@ mod tests {
     }
 
     #[test]
+    fn tab_switches_focus_and_file_navigation_tracks_selected_snapshot() {
+        let mut app = app_with_snapshots(2);
+
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Down);
+
+        assert_eq!(
+            app.selected_file().map(|file| file.path.as_str()),
+            Some("source/file-b.txt")
+        );
+
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Down);
+
+        assert_eq!(app.selected_snapshot_id(), Some("snap_002"));
+        assert_eq!(
+            app.selected_file().map(|file| file.path.as_str()),
+            Some("source/file-a.txt")
+        );
+    }
+
+    #[test]
+    fn file_filter_limits_visible_paths_and_can_clear() {
+        let mut app = app_with_snapshots(1);
+
+        app.handle_key(KeyCode::Char('/'));
+        app.handle_key(KeyCode::Char('B'));
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.filtered_file_count(), 1);
+        assert_eq!(
+            app.selected_file().map(|file| file.path.as_str()),
+            Some("source/file-b.txt")
+        );
+        assert_eq!(
+            app.help_text(),
+            "Tab focus | Up/Down or j/k move | Home/End jump | / filter files | c clear filter | q/Esc quit | ?/F1 hide help"
+        );
+
+        app.handle_key(KeyCode::Char('c'));
+
+        assert_eq!(app.filtered_file_count(), 4);
+        assert!(app.file_filter.is_empty());
+    }
+
+    #[test]
     fn render_snapshot_browser_includes_selection_and_snapshot_fields() {
         let mut app = app_with_snapshots(2);
         app.handle_key(KeyCode::Down);
-        let backend = TestBackend::new(80, 20);
+        let backend = TestBackend::new(130, 20);
         let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
 
         terminal
@@ -461,6 +774,34 @@ mod tests {
         assert!(rendered.contains("Chunk refs: 3"));
         assert!(rendered.contains("Unique chunks: 2"));
         assert!(rendered.contains("Warnings: none recorded"));
+    }
+
+    #[test]
+    fn render_file_browser_includes_file_metadata() {
+        let mut app = app_with_snapshots(1);
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Down);
+        let backend = TestBackend::new(150, 36);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render(frame, &app))
+            .expect("frame should render");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("Files *"));
+        assert!(rendered.contains("> file"));
+        assert!(rendered.contains("source/file-b.txt"));
+        assert!(rendered.contains("Selected entry:"));
+        assert!(rendered.contains("Content hash: hash-b"));
+        assert!(rendered.contains("Chunks: 2"));
+        assert!(rendered.contains("First chunk: aaaaaaaaaaaaaaaa..."));
     }
 
     #[test]
@@ -520,19 +861,30 @@ mod tests {
                     "source/file-a.txt",
                     FileType::File,
                     5,
+                    Some("hash-a"),
                     vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+                    None,
                 ),
                 file_entry(
                     "source/file-b.txt",
                     FileType::File,
                     5,
+                    Some("hash-b"),
                     vec![
                         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                     ],
+                    None,
                 ),
-                file_entry("source/dir", FileType::Directory, 0, Vec::new()),
-                file_entry("source/link", FileType::Symlink, 0, Vec::new()),
+                file_entry("source/dir", FileType::Directory, 0, None, Vec::new(), None),
+                file_entry(
+                    "source/link",
+                    FileType::Symlink,
+                    0,
+                    None,
+                    Vec::new(),
+                    Some("source/file-a.txt"),
+                ),
             ],
             summary: traceback_repo::ManifestSummary {
                 file_count: 2,
@@ -542,16 +894,23 @@ mod tests {
         }
     }
 
-    fn file_entry(path: &str, file_type: FileType, size: u64, chunks: Vec<&str>) -> FileEntry {
+    fn file_entry(
+        path: &str,
+        file_type: FileType,
+        size: u64,
+        content_hash: Option<&str>,
+        chunks: Vec<&str>,
+        symlink_target: Option<&str>,
+    ) -> FileEntry {
         FileEntry {
             path: path.to_owned(),
             file_type,
             size,
             modified_at: None,
             permissions: None,
-            content_hash: None,
+            content_hash: content_hash.map(ToOwned::to_owned),
             chunks: chunks.into_iter().map(ToOwned::to_owned).collect(),
-            symlink_target: None,
+            symlink_target: symlink_target.map(ToOwned::to_owned),
         }
     }
 }
