@@ -18,6 +18,8 @@ use traceback_repo::{
 use traceback_scan::{ScanOptions, ScannedEntry, ScannedFileType, scan};
 use uuid::Uuid;
 
+mod tui;
+
 #[derive(Debug, Parser)]
 #[command(name = "traceback")]
 #[command(about = "Explainable backup and restore tool")]
@@ -191,6 +193,12 @@ pub enum Command {
     Remote {
         #[command(subcommand)]
         command: RemoteCommand,
+    },
+    /// Open the interactive terminal browser.
+    Tui {
+        /// Backup repository directory.
+        #[arg(long)]
+        repo: PathBuf,
     },
 }
 
@@ -648,6 +656,12 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 println!("Skipped files:        {}", report.skipped_files);
                 println!("Copied bytes:         {} B", report.copied_bytes);
             }
+        }
+        Command::Tui { repo } => {
+            if json {
+                return Err("tui does not support --json".into());
+            }
+            tui::run(tui::app_for_repository(repo)?)?;
         }
     }
 
@@ -1672,6 +1686,7 @@ mod tests {
             vec!["traceback", "rehearse", "snap_001", "--repo", "./repo"],
             vec!["traceback", "check", "--repo", "./repo"],
             vec!["traceback", "recover", "--repo", "./repo"],
+            vec!["traceback", "tui", "--repo", "./repo"],
         ];
 
         for args in cases {
