@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     error::Error,
     io::{self, Stdout},
     path::PathBuf,
@@ -19,7 +20,8 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 use traceback_repo::{
-    RepositoryConfig, RepositoryError, SnapshotManifest, list_manifests, validate_repository,
+    FileType, RepositoryConfig, RepositoryError, SnapshotManifest, list_manifests,
+    validate_repository,
 };
 
 #[derive(Debug)]
@@ -36,9 +38,16 @@ pub struct TuiApp {
 struct SnapshotRow {
     snapshot_id: String,
     created_at: String,
+    state: String,
     sources: String,
+    source_count: usize,
+    file_count: u64,
+    directory_count: usize,
+    symlink_count: usize,
     logical_bytes: u64,
     newly_stored_bytes: u64,
+    chunk_references: usize,
+    unique_chunks: usize,
 }
 
 impl TuiApp {
@@ -92,6 +101,10 @@ impl TuiApp {
             .map(|snapshot| snapshot.snapshot_id.as_str())
     }
 
+    fn selected_snapshot(&self) -> Option<&SnapshotRow> {
+        self.snapshots.get(self.selected_snapshot)
+    }
+
     fn select_next_snapshot(&mut self) {
         if self.selected_snapshot + 1 < self.snapshots.len() {
             self.selected_snapshot += 1;
@@ -115,12 +128,41 @@ impl TuiApp {
 
 impl From<SnapshotManifest> for SnapshotRow {
     fn from(manifest: SnapshotManifest) -> Self {
+        let directory_count = manifest
+            .files
+            .iter()
+            .filter(|file| file.file_type == FileType::Directory)
+            .count();
+        let symlink_count = manifest
+            .files
+            .iter()
+            .filter(|file| file.file_type == FileType::Symlink)
+            .count();
+        let chunk_references = manifest
+            .files
+            .iter()
+            .map(|file| file.chunks.len())
+            .sum::<usize>();
+        let unique_chunks = manifest
+            .files
+            .iter()
+            .flat_map(|file| file.chunks.iter())
+            .collect::<BTreeSet<_>>()
+            .len();
+
         Self {
             snapshot_id: manifest.snapshot_id,
             created_at: manifest.created_at,
+            state: manifest.state,
+            source_count: manifest.sources.len(),
             sources: manifest.sources.join(", "),
+            file_count: manifest.summary.file_count,
+            directory_count,
+            symlink_count,
             logical_bytes: manifest.summary.logical_bytes,
             newly_stored_bytes: manifest.summary.newly_stored_bytes,
+            chunk_references,
+            unique_chunks,
         }
     }
 }
@@ -208,15 +250,59 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
     .block(Block::default().title("Overview").borders(Borders::ALL));
     frame.render_widget(body, chunks[1]);
 
+    let browser = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(chunks[2]);
+
     let snapshots = Paragraph::new(snapshot_lines(app))
         .wrap(Wrap { trim: false })
         .block(Block::default().title("Snapshots").borders(Borders::ALL));
-    frame.render_widget(snapshots, chunks[2]);
+    frame.render_widget(snapshots, browser[0]);
+
+    let details = Paragraph::new(snapshot_detail_lines(app))
+        .wrap(Wrap { trim: true })
+        .block(
+            Block::default()
+                .title("Snapshot Details")
+                .borders(Borders::ALL),
+        );
+    frame.render_widget(details, browser[1]);
 
     let footer = Paragraph::new(app.help_text())
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL));
     frame.render_widget(footer, chunks[3]);
+}
+
+fn snapshot_detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    let Some(snapshot) = app.selected_snapshot() else {
+        return vec![
+            Line::from("No snapshot selected."),
+            Line::from("Create a backup to inspect details here."),
+        ];
+    };
+
+    vec![
+        Line::from(format!("ID: {}", snapshot.snapshot_id)),
+        Line::from(format!(
+            "Created: {}",
+            display_created_at(&snapshot.created_at)
+        )),
+        Line::from(format!("State: {}", snapshot.state)),
+        Line::from(format!("Sources: {}", snapshot.source_count)),
+        Line::from(format!("Files: {}", snapshot.file_count)),
+        Line::from(format!("Directories: {}", snapshot.directory_count)),
+        Line::from(format!("Symlinks: {}", snapshot.symlink_count)),
+        Line::from(format!("Logical: {} B", snapshot.logical_bytes)),
+        Line::from(format!(
+            "Stored in snapshot: {} B",
+            snapshot.newly_stored_bytes
+        )),
+        Line::from(format!("Chunk refs: {}", snapshot.chunk_references)),
+        Line::from(format!("Unique chunks: {}", snapshot.unique_chunks)),
+        Line::from("Warnings: none recorded"),
+    ]
 }
 
 fn snapshot_lines(app: &TuiApp) -> Vec<Line<'static>> {
@@ -264,7 +350,9 @@ mod tests {
     use crossterm::event::KeyCode;
     use ratatui::{Terminal, backend::TestBackend};
     use tempfile::tempdir;
-    use traceback_repo::{RepositoryConfig, SnapshotManifest, init_repository};
+    use traceback_repo::{
+        FileEntry, FileType, RepositoryConfig, SnapshotManifest, init_repository,
+    };
 
     use super::{TuiApp, app_for_repository, render};
 
@@ -347,6 +435,35 @@ mod tests {
     }
 
     #[test]
+    fn detail_panel_follows_selected_snapshot() {
+        let mut app = app_with_snapshots(2);
+        app.handle_key(KeyCode::Down);
+        let backend = TestBackend::new(110, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render(frame, &app))
+            .expect("frame should render");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("Snapshot Details"));
+        assert!(rendered.contains("ID: snap_002"));
+        assert!(rendered.contains("State: complete"));
+        assert!(rendered.contains("Files: 2"));
+        assert!(rendered.contains("Directories: 1"));
+        assert!(rendered.contains("Symlinks: 1"));
+        assert!(rendered.contains("Chunk refs: 3"));
+        assert!(rendered.contains("Unique chunks: 2"));
+        assert!(rendered.contains("Warnings: none recorded"));
+    }
+
+    #[test]
     fn app_for_repository_validates_and_loads_repository() {
         let temporary = tempdir().expect("temporary directory should be created");
         let repository = temporary.path().join("repo");
@@ -398,12 +515,43 @@ mod tests {
             created_at: format!("2026-06-{index:02}T00:00:00Z"),
             state: "complete".to_owned(),
             sources: vec![format!("source-{index}")],
-            files: Vec::new(),
+            files: vec![
+                file_entry(
+                    "source/file-a.txt",
+                    FileType::File,
+                    5,
+                    vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+                ),
+                file_entry(
+                    "source/file-b.txt",
+                    FileType::File,
+                    5,
+                    vec![
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    ],
+                ),
+                file_entry("source/dir", FileType::Directory, 0, Vec::new()),
+                file_entry("source/link", FileType::Symlink, 0, Vec::new()),
+            ],
             summary: traceback_repo::ManifestSummary {
-                file_count: 0,
+                file_count: 2,
                 logical_bytes: index as u64 * 10,
                 newly_stored_bytes: index as u64,
             },
+        }
+    }
+
+    fn file_entry(path: &str, file_type: FileType, size: u64, chunks: Vec<&str>) -> FileEntry {
+        FileEntry {
+            path: path.to_owned(),
+            file_type,
+            size,
+            modified_at: None,
+            permissions: None,
+            content_hash: None,
+            chunks: chunks.into_iter().map(ToOwned::to_owned).collect(),
+            symlink_target: None,
         }
     }
 }
