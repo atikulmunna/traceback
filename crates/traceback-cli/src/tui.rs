@@ -21,7 +21,7 @@ use ratatui::{
 };
 use traceback_repo::{
     CheckReport, FileType, RepositoryConfig, RepositoryError, SnapshotManifest, check_repository,
-    list_manifests, restore_snapshot, restore_snapshot_path, validate_repository,
+    diff_snapshots, list_manifests, restore_snapshot, restore_snapshot_path, validate_repository,
 };
 
 use crate::{BackupRequest, run_backup};
@@ -40,6 +40,10 @@ pub struct TuiApp {
     restore_target: Option<PathBuf>,
     restore_result: Option<RestoreRunSummary>,
     health_report: Option<HealthCheckSummary>,
+    diff_old_snapshot: usize,
+    diff_new_snapshot: usize,
+    diff_focus_old: bool,
+    diff_result: Option<DiffRunSummary>,
     selected_snapshot: usize,
     selected_file: usize,
     focus: TuiFocus,
@@ -58,6 +62,7 @@ enum TuiView {
     PathInput,
     BackupReview,
     HealthCheck,
+    SnapshotDiff,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,9 +130,9 @@ const MENU_ITEMS: [MenuItem; 7] = [
     },
     MenuItem {
         label: "Compare snapshots",
-        description: "Guided snapshot diff. Coming soon.",
+        description: "Select two snapshots and review changed paths.",
         action: MenuAction::CompareSnapshots,
-        enabled: false,
+        enabled: true,
     },
     MenuItem {
         label: "Exit",
@@ -179,6 +184,24 @@ struct HealthCheckSummary {
     issues: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffRunSummary {
+    old_snapshot_id: String,
+    new_snapshot_id: String,
+    added: Vec<DiffEntrySummary>,
+    removed: Vec<DiffEntrySummary>,
+    modified: Vec<DiffEntrySummary>,
+    unchanged: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffEntrySummary {
+    path: String,
+    byte_delta: i128,
+    type_changed: bool,
+    content_changed: bool,
+}
+
 impl From<CheckReport> for HealthCheckSummary {
     fn from(report: CheckReport) -> Self {
         Self {
@@ -193,6 +216,17 @@ impl From<CheckReport> for HealthCheckSummary {
                 .into_iter()
                 .map(|issue| issue.to_string())
                 .collect(),
+        }
+    }
+}
+
+impl From<traceback_repo::DiffEntry> for DiffEntrySummary {
+    fn from(entry: traceback_repo::DiffEntry) -> Self {
+        Self {
+            path: entry.path,
+            byte_delta: entry.byte_delta,
+            type_changed: entry.type_changed,
+            content_changed: entry.content_changed,
         }
     }
 }
@@ -252,6 +286,10 @@ impl TuiApp {
             restore_target: None,
             restore_result: None,
             health_report: None,
+            diff_old_snapshot: 0,
+            diff_new_snapshot: 1,
+            diff_focus_old: true,
+            diff_result: None,
             selected_snapshot: 0,
             selected_file: 0,
             focus: TuiFocus::Snapshots,
@@ -282,6 +320,11 @@ impl TuiApp {
 
         if self.view == TuiView::HealthCheck {
             self.handle_health_check_key(code);
+            return;
+        }
+
+        if self.view == TuiView::SnapshotDiff {
+            self.handle_snapshot_diff_key(code);
             return;
         }
 
@@ -379,6 +422,24 @@ impl TuiApp {
         }
     }
 
+    fn handle_snapshot_diff_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.run_snapshot_diff(),
+            KeyCode::Tab => {
+                self.diff_focus_old = !self.diff_focus_old;
+                self.diff_result = None;
+            }
+            KeyCode::Down | KeyCode::Char('j') => self.select_next_diff_snapshot(),
+            KeyCode::Up | KeyCode::Char('k') => self.select_previous_diff_snapshot(),
+            KeyCode::Home => self.select_first_diff_snapshot(),
+            KeyCode::End => self.select_last_diff_snapshot(),
+            KeyCode::Backspace | KeyCode::Esc => self.view = TuiView::MainMenu,
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = !self.show_help,
+            _ => {}
+        }
+    }
+
     fn handle_restore_confirmation_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Char('y') | KeyCode::Char('Y') => self.run_guided_restore(),
@@ -418,6 +479,11 @@ impl TuiApp {
 
         if self.view == TuiView::HealthCheck {
             return "Enter rerun check | Backspace/Esc menu | q quit".to_owned();
+        }
+
+        if self.view == TuiView::SnapshotDiff {
+            return "Tab old/new | Up/Down choose | Enter diff | Backspace/Esc menu | q quit"
+                .to_owned();
         }
 
         if self.view == TuiView::MainMenu {
@@ -527,8 +593,21 @@ impl TuiApp {
                 self.view = TuiView::HealthCheck;
                 self.run_health_check();
             }
+            MenuAction::CompareSnapshots => self.open_snapshot_diff(),
             MenuAction::Quit => self.should_quit = true,
-            MenuAction::CompareSnapshots => {}
+        }
+    }
+
+    fn open_snapshot_diff(&mut self) {
+        self.view = TuiView::SnapshotDiff;
+        self.diff_focus_old = true;
+        self.diff_result = None;
+        self.normalize_diff_selection();
+        if self.snapshots.len() < 2 {
+            self.status_message = Some("Create at least two snapshots to compare.".to_owned());
+        } else {
+            self.status_message =
+                Some("Choose two snapshots, then press Enter to diff.".to_owned());
         }
     }
 
@@ -757,6 +836,106 @@ impl TuiApp {
         });
     }
 
+    fn run_snapshot_diff(&mut self) {
+        if self.snapshots.len() < 2 {
+            self.status_message = Some("Create at least two snapshots to compare.".to_owned());
+            return;
+        }
+        self.normalize_diff_selection();
+        let old_snapshot_id = self.snapshots[self.diff_old_snapshot].snapshot_id.clone();
+        let new_snapshot_id = self.snapshots[self.diff_new_snapshot].snapshot_id.clone();
+        if old_snapshot_id == new_snapshot_id {
+            self.status_message = Some("Choose two different snapshots to compare.".to_owned());
+            return;
+        }
+
+        match diff_snapshots(&self.repository, &old_snapshot_id, &new_snapshot_id) {
+            Ok(diff) => {
+                let changed = diff.changed_count();
+                self.diff_result = Some(DiffRunSummary {
+                    old_snapshot_id: diff.old_snapshot_id,
+                    new_snapshot_id: diff.new_snapshot_id,
+                    added: diff.added.into_iter().map(DiffEntrySummary::from).collect(),
+                    removed: diff
+                        .removed
+                        .into_iter()
+                        .map(DiffEntrySummary::from)
+                        .collect(),
+                    modified: diff
+                        .modified
+                        .into_iter()
+                        .map(DiffEntrySummary::from)
+                        .collect(),
+                    unchanged: diff.unchanged,
+                });
+                self.status_message =
+                    Some(format!("Snapshot diff found {changed} changed path(s)."));
+            }
+            Err(error) => {
+                self.status_message = Some(format!("Snapshot diff failed: {error}"));
+            }
+        }
+    }
+
+    fn normalize_diff_selection(&mut self) {
+        let snapshot_count = self.snapshots.len();
+        if snapshot_count == 0 {
+            self.diff_old_snapshot = 0;
+            self.diff_new_snapshot = 0;
+            return;
+        }
+        self.diff_old_snapshot = self.diff_old_snapshot.min(snapshot_count - 1);
+        self.diff_new_snapshot = self.diff_new_snapshot.min(snapshot_count - 1);
+        if snapshot_count > 1 && self.diff_old_snapshot == self.diff_new_snapshot {
+            self.diff_new_snapshot = (self.diff_old_snapshot + 1).min(snapshot_count - 1);
+            if self.diff_new_snapshot == self.diff_old_snapshot {
+                self.diff_old_snapshot = self.diff_old_snapshot.saturating_sub(1);
+            }
+        }
+    }
+
+    fn select_next_diff_snapshot(&mut self) {
+        if self.snapshots.is_empty() {
+            return;
+        }
+        if self.diff_focus_old {
+            self.diff_old_snapshot = (self.diff_old_snapshot + 1).min(self.snapshots.len() - 1);
+        } else {
+            self.diff_new_snapshot = (self.diff_new_snapshot + 1).min(self.snapshots.len() - 1);
+        }
+        self.diff_result = None;
+    }
+
+    fn select_previous_diff_snapshot(&mut self) {
+        if self.diff_focus_old {
+            self.diff_old_snapshot = self.diff_old_snapshot.saturating_sub(1);
+        } else {
+            self.diff_new_snapshot = self.diff_new_snapshot.saturating_sub(1);
+        }
+        self.diff_result = None;
+    }
+
+    fn select_first_diff_snapshot(&mut self) {
+        if self.diff_focus_old {
+            self.diff_old_snapshot = 0;
+        } else {
+            self.diff_new_snapshot = 0;
+        }
+        self.diff_result = None;
+    }
+
+    fn select_last_diff_snapshot(&mut self) {
+        let Some(last) = self.snapshots.len().checked_sub(1) else {
+            return;
+        };
+        if self.diff_focus_old {
+            self.diff_old_snapshot = last;
+        } else {
+            self.diff_new_snapshot = last;
+        }
+        self.diff_result = None;
+    }
+
     fn select_next(&mut self) {
         match self.focus {
             TuiFocus::Snapshots => self.select_next_snapshot(),
@@ -961,9 +1140,11 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
 
     let title_text = match app.view {
         TuiView::Browser => " terminal browser",
-        TuiView::MainMenu | TuiView::PathInput | TuiView::BackupReview | TuiView::HealthCheck => {
-            " guided terminal"
-        }
+        TuiView::MainMenu
+        | TuiView::PathInput
+        | TuiView::BackupReview
+        | TuiView::HealthCheck
+        | TuiView::SnapshotDiff => " guided terminal",
     };
     let title = Paragraph::new(Line::from(vec![
         Span::styled("TraceBack", Style::default().add_modifier(Modifier::BOLD)),
@@ -1032,6 +1213,23 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
                     .borders(Borders::ALL),
             );
         frame.render_widget(health, chunks[2]);
+
+        let footer = Paragraph::new(app.help_text())
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL));
+        frame.render_widget(footer, chunks[3]);
+        return;
+    }
+
+    if app.view == TuiView::SnapshotDiff {
+        let diff = Paragraph::new(snapshot_diff_lines(app))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title("Snapshot Diff")
+                    .borders(Borders::ALL),
+            );
+        frame.render_widget(diff, chunks[2]);
 
         let footer = Paragraph::new(app.help_text())
             .alignment(Alignment::Center)
@@ -1246,6 +1444,91 @@ fn health_check_lines(app: &TuiApp) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn snapshot_diff_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    if app.snapshots.len() < 2 {
+        return vec![
+            Line::from("Snapshot diff needs at least two snapshots."),
+            Line::from("Create another backup, then return here."),
+        ];
+    }
+
+    let old = diff_snapshot_label(app, app.diff_old_snapshot);
+    let new = diff_snapshot_label(app, app.diff_new_snapshot);
+    let old_marker = if app.diff_focus_old { ">" } else { " " };
+    let new_marker = if app.diff_focus_old { " " } else { ">" };
+    let mut lines = vec![
+        Line::from("Select snapshots to compare."),
+        Line::from(""),
+        Line::from(format!("{old_marker} Old: {old}")),
+        Line::from(format!("{new_marker} New: {new}")),
+        Line::from(""),
+        Line::from("Press Enter to run diff."),
+    ];
+
+    if let Some(result) = &app.diff_result {
+        lines.extend([
+            Line::from(""),
+            Line::from("Diff result:"),
+            Line::from(format!(
+                "{} -> {}",
+                result.old_snapshot_id, result.new_snapshot_id
+            )),
+            Line::from(format!("Added: {}", result.added.len())),
+            Line::from(format!("Removed: {}", result.removed.len())),
+            Line::from(format!("Modified: {}", result.modified.len())),
+            Line::from(format!("Unchanged: {}", result.unchanged)),
+            Line::from(""),
+            Line::from("Changed paths:"),
+        ]);
+        let entries = result
+            .added
+            .iter()
+            .map(|entry| ("A", entry))
+            .chain(result.removed.iter().map(|entry| ("R", entry)))
+            .chain(result.modified.iter().map(|entry| ("M", entry)));
+        let mut shown = 0usize;
+        for (kind, entry) in entries.take(10) {
+            shown += 1;
+            lines.push(Line::from(format!(
+                "{kind} {:>6} B  {}{}{}",
+                format!("{:+}", entry.byte_delta),
+                entry.path,
+                if entry.type_changed { " type" } else { "" },
+                if entry.content_changed {
+                    " content"
+                } else {
+                    ""
+                }
+            )));
+        }
+        let changed_count = result.added.len() + result.removed.len() + result.modified.len();
+        if changed_count == 0 {
+            lines.push(Line::from("No changed paths."));
+        } else if changed_count > shown {
+            lines.push(Line::from(format!(
+                "... {} more changed path(s)",
+                changed_count - shown
+            )));
+        }
+    }
+
+    lines
+}
+
+fn diff_snapshot_label(app: &TuiApp, index: usize) -> String {
+    app.snapshots
+        .get(index)
+        .map(|snapshot| {
+            format!(
+                "{}  {}  {}",
+                snapshot.snapshot_id,
+                display_created_at(&snapshot.created_at),
+                snapshot.sources
+            )
+        })
+        .unwrap_or_else(|| "<none>".to_owned())
 }
 
 fn focused_title(title: &str, focused: bool) -> String {
@@ -1493,8 +1776,8 @@ mod tests {
     use crate::{BackupRequest, run_backup};
 
     use super::{
-        BackupRunSummary, RestoreConfirmation, TuiApp, TuiFocus, TuiView, app_for_repository,
-        render,
+        BackupRunSummary, DiffEntrySummary, DiffRunSummary, RestoreConfirmation, TuiApp, TuiFocus,
+        TuiView, app_for_repository, render,
     };
 
     #[test]
@@ -1536,7 +1819,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_compare_menu_item_does_not_leave_menu() {
+    fn compare_menu_opens_diff_screen_and_requires_two_snapshots() {
         let mut app = app_with_snapshots(1);
 
         press_keys(
@@ -1551,8 +1834,12 @@ mod tests {
             ],
         );
 
-        assert_eq!(app.view, TuiView::MainMenu);
+        assert_eq!(app.view, TuiView::SnapshotDiff);
         assert!(!app.should_quit());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Create at least two snapshots to compare.")
+        );
     }
 
     #[test]
@@ -2098,6 +2385,89 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_diff_screen_runs_diff_between_selected_snapshots() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let source = temporary.path().join("source");
+        std::fs::create_dir(&source).expect("source should be created");
+        std::fs::write(source.join("hello.txt"), "hello").expect("source file should be written");
+        init_repository(&repository).expect("repository should initialize");
+        run_backup(BackupRequest {
+            paths: vec![source.clone()],
+            repo: repository.clone(),
+            policy_ignore_patterns: Vec::new(),
+            fail_on_changed_file: false,
+        })
+        .expect("first backup should run");
+        std::fs::write(source.join("hello.txt"), "hello world")
+            .expect("source file should be changed");
+        run_backup(BackupRequest {
+            paths: vec![source],
+            repo: repository.clone(),
+            policy_ignore_patterns: Vec::new(),
+            fail_on_changed_file: false,
+        })
+        .expect("second backup should run");
+        let mut app = app_for_repository(repository).expect("app should load repository");
+
+        press_keys(
+            &mut app,
+            [
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Enter,
+                KeyCode::Enter,
+            ],
+        );
+
+        assert_eq!(app.view, TuiView::SnapshotDiff);
+        let result = app
+            .diff_result
+            .as_ref()
+            .expect("diff result should be recorded");
+        assert_eq!(result.modified.len(), 1);
+        assert_eq!(result.modified[0].path, "source/hello.txt");
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Snapshot diff found 1 changed path(s).")
+        );
+    }
+
+    #[test]
+    fn render_snapshot_diff_includes_selection_and_result() {
+        let mut app = app_with_snapshots(2);
+        app.view = TuiView::SnapshotDiff;
+        app.diff_result = Some(DiffRunSummary {
+            old_snapshot_id: "snap_001".to_owned(),
+            new_snapshot_id: "snap_002".to_owned(),
+            added: Vec::new(),
+            removed: Vec::new(),
+            modified: vec![DiffEntrySummary {
+                path: "source/file-a.txt".to_owned(),
+                byte_delta: 5,
+                type_changed: false,
+                content_changed: true,
+            }],
+            unchanged: 3,
+        });
+        let backend = TestBackend::new(150, 34);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+
+        let rendered = render_to_string(&mut terminal, &app);
+
+        assert!(rendered.contains("Snapshot Diff"));
+        assert!(rendered.contains("> Old: snap_001"));
+        assert!(rendered.contains("New: snap_002"));
+        assert!(rendered.contains("Diff result:"));
+        assert!(rendered.contains("Modified: 1"));
+        assert!(rendered.contains("source/file-a.txt"));
+        assert!(rendered.contains("content"));
+    }
+
+    #[test]
     fn app_for_repository_validates_and_loads_repository() {
         let temporary = tempdir().expect("temporary directory should be created");
         let repository = temporary.path().join("repo");
@@ -2157,7 +2527,6 @@ mod tests {
         assert!(rendered.contains("> Browse snapshots"));
         assert!(rendered.contains("Change repository"));
         assert!(rendered.contains("Create backup"));
-        assert!(rendered.contains("coming soon"));
         assert!(rendered.contains("Restore files"));
         assert!(rendered.contains("Check repository health"));
         assert!(rendered.contains("Compare snapshots"));
