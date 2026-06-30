@@ -88,16 +88,16 @@ traceback tui --repo ./my-backups
 ```
 
 The main menu lets users choose guided actions such as changing the repository,
-running a backup from a selected source, browsing snapshots, previewing restores,
+running a backup from a selected source, browsing snapshots, restoring files,
 checking repository health, comparing snapshots, or exiting. Health-check and
 diff execution flows are listed as guided actions and will be filled in
 incrementally.
 
 The snapshot browser shows three panels: snapshots, files in the selected
-snapshot, and details for the selected snapshot or file. Restore support is
-intentionally a preview step: it prepares a normal `traceback restore ...`
-command and requires confirmation, but it does not write files from inside the
-TUI.
+snapshot, and details for the selected snapshot or file. Restore support previews
+the exact target and equivalent `traceback restore ...` command first. The TUI
+only writes after an explicit target is entered with `t` and the restore is
+confirmed with `y`.
 
 TUI keybindings:
 
@@ -113,8 +113,8 @@ Enter           accept the current file filter
 t               enter a restore target path from the browser
 Esc             stop filtering, cancel restore preview, or quit
 c               clear the file filter while the file panel is focused
-r               preview a restore command for the focused snapshot/file
-y               confirm restore command preparation
+r               preview a restore for the focused snapshot/file
+y               run the previewed restore after choosing a target
 n               cancel or clear a restore preview
 ? or F1         show or hide help
 q               quit

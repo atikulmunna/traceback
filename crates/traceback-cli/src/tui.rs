@@ -21,7 +21,7 @@ use ratatui::{
 };
 use traceback_repo::{
     FileType, RepositoryConfig, RepositoryError, SnapshotManifest, list_manifests,
-    validate_repository,
+    restore_snapshot, restore_snapshot_path, validate_repository,
 };
 
 use crate::{BackupRequest, run_backup};
@@ -38,6 +38,7 @@ pub struct TuiApp {
     backup_source: Option<PathBuf>,
     backup_result: Option<BackupRunSummary>,
     restore_target: Option<PathBuf>,
+    restore_result: Option<RestoreRunSummary>,
     selected_snapshot: usize,
     selected_file: usize,
     focus: TuiFocus,
@@ -158,6 +159,14 @@ struct BackupRunSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct RestoreRunSummary {
+    files: u64,
+    directories: u64,
+    symlinks: u64,
+    bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SnapshotRow {
     snapshot_id: String,
     created_at: String,
@@ -210,6 +219,7 @@ impl TuiApp {
             backup_source: None,
             backup_result: None,
             restore_target: None,
+            restore_result: None,
             selected_snapshot: 0,
             selected_file: 0,
             focus: TuiFocus::Snapshots,
@@ -324,9 +334,7 @@ impl TuiApp {
 
     fn handle_restore_confirmation_key(&mut self, code: KeyCode) {
         match code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                self.restore_confirmation = RestoreConfirmation::Confirmed;
-            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => self.run_guided_restore(),
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => self.clear_restore_plan(),
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
@@ -370,12 +378,11 @@ impl TuiApp {
         }
 
         if self.restore_confirmation == RestoreConfirmation::Awaiting {
-            return "Restore preview only | y confirm command preparation | n/Esc cancel | q quit"
-                .to_owned();
+            return "y run restore | n/Esc cancel | t change target | q quit".to_owned();
         }
 
         if self.restore_confirmation == RestoreConfirmation::Confirmed {
-            return "Restore command prepared | n clear preview | q/Esc quit".to_owned();
+            return "Restore completed | n clear preview | Backspace menu | q/Esc quit".to_owned();
         }
 
         if self.filtering_files {
@@ -560,6 +567,7 @@ impl TuiApp {
                 }
                 self.restore_target = Some(path.to_owned());
                 self.clear_restore_plan();
+                self.restore_result = None;
                 Ok(format!("Restore target selected: {}", path.display()))
             }
         }
@@ -647,6 +655,40 @@ impl TuiApp {
             target,
             command,
         })
+    }
+
+    fn run_guided_restore(&mut self) {
+        let Some(plan) = self.restore_plan.clone() else {
+            self.status_message = Some("Preview a restore before running it.".to_owned());
+            return;
+        };
+        if self.restore_target.is_none() {
+            self.status_message = Some("Choose a restore target with t before running.".to_owned());
+            return;
+        }
+
+        let result = if let Some(path) = &plan.selected_path {
+            restore_snapshot_path(&self.repository, &plan.snapshot_id, path, &plan.target)
+        } else {
+            restore_snapshot(&self.repository, &plan.snapshot_id, &plan.target)
+        };
+
+        match result {
+            Ok(summary) => {
+                self.restore_result = Some(RestoreRunSummary {
+                    files: summary.files,
+                    directories: summary.directories,
+                    symlinks: summary.symlinks,
+                    bytes: summary.bytes,
+                });
+                self.restore_confirmation = RestoreConfirmation::Confirmed;
+                self.status_message =
+                    Some(format!("Restore completed to {}", plan.target.display()));
+            }
+            Err(error) => {
+                self.status_message = Some(format!("Restore failed: {error}"));
+            }
+        }
     }
 
     fn select_next(&mut self) {
@@ -1159,7 +1201,7 @@ fn restore_plan_lines(app: &TuiApp) -> Vec<Line<'static>> {
     let status = match app.restore_confirmation {
         RestoreConfirmation::None => "not prepared",
         RestoreConfirmation::Awaiting => "awaiting confirmation",
-        RestoreConfirmation::Confirmed => "command prepared",
+        RestoreConfirmation::Confirmed => "restore completed",
     };
     let scope = plan.selected_path.as_deref().unwrap_or("<entire snapshot>");
 
@@ -1167,12 +1209,24 @@ fn restore_plan_lines(app: &TuiApp) -> Vec<Line<'static>> {
         Line::from(""),
         Line::from("Restore preview:"),
         Line::from(format!("Status: {status}")),
-        Line::from("Safety: preview only; no TUI writes."),
+        Line::from("Safety: restore writes only after y confirmation."),
         Line::from(format!("Snapshot: {}", plan.snapshot_id)),
         Line::from(format!("Path: {scope}")),
         Line::from(format!("Target: {}", plan.target.display())),
         Line::from(format!("Command: {}", plan.command)),
     ]
+    .into_iter()
+    .chain(app.restore_result.as_ref().into_iter().flat_map(|result| {
+        [
+            Line::from(""),
+            Line::from("Restore result:"),
+            Line::from(format!("Files: {}", result.files)),
+            Line::from(format!("Directories: {}", result.directories)),
+            Line::from(format!("Symlinks: {}", result.symlinks)),
+            Line::from(format!("Bytes: {} B", result.bytes)),
+        ]
+    }))
+    .collect()
 }
 
 fn snapshot_lines(app: &TuiApp) -> Vec<Line<'static>> {
@@ -1297,6 +1351,8 @@ mod tests {
     use traceback_repo::{
         FileEntry, FileType, RepositoryConfig, SnapshotManifest, init_repository,
     };
+
+    use crate::{BackupRequest, run_backup};
 
     use super::{
         BackupRunSummary, RestoreConfirmation, TuiApp, TuiFocus, TuiView, app_for_repository,
@@ -1648,10 +1704,10 @@ mod tests {
 
         app.handle_key(KeyCode::Char('y'));
 
-        assert_eq!(app.restore_confirmation, RestoreConfirmation::Confirmed);
+        assert_eq!(app.restore_confirmation, RestoreConfirmation::Awaiting);
         assert_eq!(
-            app.help_text(),
-            "Restore command prepared | n clear preview | q/Esc quit"
+            app.status_message.as_deref(),
+            Some("Choose a restore target with t before running.")
         );
 
         app.handle_key(KeyCode::Char('n'));
@@ -1704,6 +1760,43 @@ mod tests {
     }
 
     #[test]
+    fn guided_restore_runs_selected_file_to_target() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let source = temporary.path().join("source");
+        let target = temporary.path().join("restored.txt");
+        std::fs::create_dir(&source).expect("source should be created");
+        std::fs::write(source.join("hello.txt"), "hello").expect("source file should be written");
+        init_repository(&repository).expect("repository should initialize");
+        run_backup(BackupRequest {
+            paths: vec![source],
+            repo: repository.clone(),
+            policy_ignore_patterns: Vec::new(),
+            fail_on_changed_file: false,
+        })
+        .expect("backup should run");
+        let mut app = app_for_repository(repository).expect("app should load repository");
+        app.view = TuiView::Browser;
+        app.focus = TuiFocus::Files;
+        app.restore_target = Some(target.clone());
+
+        app.handle_key(KeyCode::Char('r'));
+        app.handle_key(KeyCode::Char('y'));
+
+        assert_eq!(app.restore_confirmation, RestoreConfirmation::Confirmed);
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("target should be restored"),
+            "hello"
+        );
+        let result = app
+            .restore_result
+            .as_ref()
+            .expect("restore result should be recorded");
+        assert_eq!(result.files, 1);
+        assert_eq!(result.bytes, 5);
+    }
+
+    #[test]
     fn restore_confirmation_blocks_navigation_until_cancelled() {
         let mut app = browser_app_with_snapshots(2);
 
@@ -1723,10 +1816,9 @@ mod tests {
     fn changing_selection_clears_confirmed_restore_preview() {
         let mut app = browser_app_with_snapshots(2);
 
-        press_keys(
-            &mut app,
-            [KeyCode::Char('r'), KeyCode::Char('y'), KeyCode::Down],
-        );
+        app.handle_key(KeyCode::Char('r'));
+        app.restore_confirmation = RestoreConfirmation::Confirmed;
+        app.handle_key(KeyCode::Down);
 
         assert_eq!(app.selected_snapshot_id(), Some("snap_002"));
         assert!(app.restore_plan.is_none());
@@ -1801,7 +1893,7 @@ mod tests {
 
         assert!(rendered.contains("Restore preview:"));
         assert!(rendered.contains("Status: awaiting confirmation"));
-        assert!(rendered.contains("Safety: preview only; no TUI writes."));
+        assert!(rendered.contains("Safety: restore writes only after y confirmation."));
         assert!(rendered.contains(&format!(
             "Target: {}",
             PathBuf::from("traceback-restore")
