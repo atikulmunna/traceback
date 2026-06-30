@@ -29,6 +29,8 @@ pub struct TuiApp {
     repository: PathBuf,
     repository_id: String,
     snapshots: Vec<SnapshotRow>,
+    view: TuiView,
+    selected_menu_item: usize,
     selected_snapshot: usize,
     selected_file: usize,
     focus: TuiFocus,
@@ -38,6 +40,12 @@ pub struct TuiApp {
     restore_confirmation: RestoreConfirmation,
     show_help: bool,
     should_quit: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiView {
+    MainMenu,
+    Browser,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +60,63 @@ enum RestoreConfirmation {
     Awaiting,
     Confirmed,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuAction {
+    BrowseSnapshots,
+    CreateBackup,
+    RestoreFiles,
+    CheckHealth,
+    CompareSnapshots,
+    Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MenuItem {
+    label: &'static str,
+    description: &'static str,
+    action: MenuAction,
+    enabled: bool,
+}
+
+const MENU_ITEMS: [MenuItem; 6] = [
+    MenuItem {
+        label: "Browse snapshots",
+        description: "Inspect snapshots, files, metadata, and restore previews.",
+        action: MenuAction::BrowseSnapshots,
+        enabled: true,
+    },
+    MenuItem {
+        label: "Create backup",
+        description: "Guided backup flow. Coming next.",
+        action: MenuAction::CreateBackup,
+        enabled: false,
+    },
+    MenuItem {
+        label: "Restore files",
+        description: "Open the browser and preview safe restore commands.",
+        action: MenuAction::RestoreFiles,
+        enabled: true,
+    },
+    MenuItem {
+        label: "Check repository health",
+        description: "Guided integrity and health check. Coming soon.",
+        action: MenuAction::CheckHealth,
+        enabled: false,
+    },
+    MenuItem {
+        label: "Compare snapshots",
+        description: "Guided snapshot diff. Coming soon.",
+        action: MenuAction::CompareSnapshots,
+        enabled: false,
+    },
+    MenuItem {
+        label: "Exit",
+        description: "Close the terminal UI.",
+        action: MenuAction::Quit,
+        enabled: true,
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SnapshotRow {
@@ -99,6 +164,8 @@ impl TuiApp {
             repository,
             repository_id: config.repository_id,
             snapshots,
+            view: TuiView::MainMenu,
+            selected_menu_item: 0,
             selected_snapshot: 0,
             selected_file: 0,
             focus: TuiFocus::Snapshots,
@@ -112,6 +179,11 @@ impl TuiApp {
     }
 
     fn handle_key(&mut self, code: KeyCode) {
+        if self.view == TuiView::MainMenu {
+            self.handle_main_menu_key(code);
+            return;
+        }
+
         if self.filtering_files {
             self.handle_filter_key(code);
             return;
@@ -124,6 +196,7 @@ impl TuiApp {
 
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Backspace => self.view = TuiView::MainMenu,
             KeyCode::Char('?') | KeyCode::F(1) => self.show_help = !self.show_help,
             KeyCode::Tab => self.toggle_focus(),
             KeyCode::Char('r') => self.prepare_restore_plan(),
@@ -144,6 +217,19 @@ impl TuiApp {
             KeyCode::Up | KeyCode::Char('k') => self.select_previous(),
             KeyCode::Home => self.select_first(),
             KeyCode::End => self.select_last(),
+            _ => {}
+        }
+    }
+
+    fn handle_main_menu_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = !self.show_help,
+            KeyCode::Down | KeyCode::Char('j') => self.select_next_menu_item(),
+            KeyCode::Up | KeyCode::Char('k') => self.select_previous_menu_item(),
+            KeyCode::Home => self.selected_menu_item = 0,
+            KeyCode::End => self.selected_menu_item = MENU_ITEMS.len() - 1,
+            KeyCode::Enter => self.activate_menu_item(),
             _ => {}
         }
     }
@@ -179,6 +265,14 @@ impl TuiApp {
     }
 
     fn help_text(&self) -> String {
+        if self.view == TuiView::MainMenu {
+            return if self.show_help {
+                "Up/Down or j/k choose | Enter select | q/Esc quit | ?/F1 hide help".to_owned()
+            } else {
+                "?/F1 help | q/Esc quit".to_owned()
+            };
+        }
+
         if self.restore_confirmation == RestoreConfirmation::Awaiting {
             return "Restore preview only | y confirm command preparation | n/Esc cancel | q quit"
                 .to_owned();
@@ -194,9 +288,9 @@ impl TuiApp {
         }
 
         if self.show_help {
-            "Tab focus | Up/Down or j/k move | Home/End jump | / filter files | c clear filter | r restore preview | q/Esc quit | ?/F1 hide help".to_owned()
+            "Backspace menu | Tab focus | Up/Down or j/k move | Home/End jump | / filter files | c clear filter | r restore preview | q/Esc quit | ?/F1 hide help".to_owned()
         } else {
-            "?/F1 help | q/Esc quit".to_owned()
+            "Backspace menu | ?/F1 help | q/Esc quit".to_owned()
         }
     }
 
@@ -240,6 +334,36 @@ impl TuiApp {
             TuiFocus::Snapshots => TuiFocus::Files,
             TuiFocus::Files => TuiFocus::Snapshots,
         };
+    }
+
+    fn select_next_menu_item(&mut self) {
+        if self.selected_menu_item + 1 < MENU_ITEMS.len() {
+            self.selected_menu_item += 1;
+        }
+    }
+
+    fn select_previous_menu_item(&mut self) {
+        self.selected_menu_item = self.selected_menu_item.saturating_sub(1);
+    }
+
+    fn activate_menu_item(&mut self) {
+        let item = MENU_ITEMS[self.selected_menu_item];
+        if !item.enabled {
+            return;
+        }
+
+        match item.action {
+            MenuAction::BrowseSnapshots | MenuAction::RestoreFiles => {
+                self.view = TuiView::Browser;
+                self.focus = if item.action == MenuAction::RestoreFiles {
+                    TuiFocus::Files
+                } else {
+                    TuiFocus::Snapshots
+                };
+            }
+            MenuAction::Quit => self.should_quit = true,
+            MenuAction::CreateBackup | MenuAction::CheckHealth | MenuAction::CompareSnapshots => {}
+        }
     }
 
     fn prepare_restore_plan(&mut self) {
@@ -485,9 +609,14 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
         ])
         .split(area);
 
+    let title_text = if app.view == TuiView::MainMenu {
+        " guided terminal"
+    } else {
+        " terminal browser"
+    };
     let title = Paragraph::new(Line::from(vec![
         Span::styled("TraceBack", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" terminal browser"),
+        Span::raw(title_text),
     ]))
     .alignment(Alignment::Center)
     .block(Block::default().borders(Borders::ALL));
@@ -507,6 +636,19 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
     .wrap(Wrap { trim: true })
     .block(Block::default().title("Overview").borders(Borders::ALL));
     frame.render_widget(body, chunks[1]);
+
+    if app.view == TuiView::MainMenu {
+        let menu = Paragraph::new(menu_lines(app))
+            .wrap(Wrap { trim: false })
+            .block(Block::default().title("Main Menu").borders(Borders::ALL));
+        frame.render_widget(menu, chunks[2]);
+
+        let footer = Paragraph::new(app.help_text())
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL));
+        frame.render_widget(footer, chunks[3]);
+        return;
+    }
 
     let browser = Layout::default()
         .direction(Direction::Horizontal)
@@ -548,6 +690,29 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL));
     frame.render_widget(footer, chunks[3]);
+}
+
+fn menu_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("Choose what you want to do."), Line::from("")];
+
+    lines.extend(MENU_ITEMS.iter().enumerate().map(|(index, item)| {
+        let marker = if index == app.selected_menu_item {
+            ">"
+        } else {
+            " "
+        };
+        let availability = if item.enabled { "" } else { " (coming soon)" };
+        Line::from(format!(
+            "{marker} {:<24} {}{}",
+            item.label, item.description, availability
+        ))
+    }));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        "Tip: start with Browse snapshots for the current repository.",
+    ));
+    lines
 }
 
 fn focused_title(title: &str, focused: bool) -> String {
@@ -780,16 +945,17 @@ mod tests {
         FileEntry, FileType, RepositoryConfig, SnapshotManifest, init_repository,
     };
 
-    use super::{RestoreConfirmation, TuiApp, app_for_repository, render};
+    use super::{RestoreConfirmation, TuiApp, TuiFocus, TuiView, app_for_repository, render};
 
     #[test]
-    fn app_starts_with_help_and_quits_on_q_or_escape() {
+    fn app_starts_on_main_menu_and_quits_on_q_or_escape() {
         let mut app = app_with_snapshots(0);
 
         assert!(!app.should_quit());
+        assert_eq!(app.view, TuiView::MainMenu);
         assert_eq!(
             app.help_text(),
-            "Tab focus | Up/Down or j/k move | Home/End jump | / filter files | c clear filter | r restore preview | q/Esc quit | ?/F1 hide help"
+            "Up/Down or j/k choose | Enter select | q/Esc quit | ?/F1 hide help"
         );
 
         app.handle_key(KeyCode::Char('?'));
@@ -801,8 +967,44 @@ mod tests {
     }
 
     #[test]
-    fn filter_mode_captures_quit_keys_until_filtering_stops() {
+    fn main_menu_navigation_opens_browser_and_restore_entry_focuses_files() {
         let mut app = app_with_snapshots(1);
+
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.view, TuiView::Browser);
+        assert_eq!(app.focus, TuiFocus::Snapshots);
+
+        app.handle_key(KeyCode::Backspace);
+        press_keys(&mut app, [KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+
+        assert_eq!(app.view, TuiView::Browser);
+        assert_eq!(app.focus, TuiFocus::Files);
+    }
+
+    #[test]
+    fn disabled_main_menu_items_do_not_leave_menu() {
+        let mut app = app_with_snapshots(1);
+
+        press_keys(&mut app, [KeyCode::Down, KeyCode::Enter]);
+
+        assert_eq!(app.view, TuiView::MainMenu);
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn main_menu_exit_item_quits() {
+        let mut app = app_with_snapshots(1);
+
+        app.handle_key(KeyCode::End);
+        app.handle_key(KeyCode::Enter);
+
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn filter_mode_captures_quit_keys_until_filtering_stops() {
+        let mut app = browser_app_with_snapshots(1);
 
         press_keys(&mut app, [KeyCode::Char('/'), KeyCode::Char('q')]);
 
@@ -820,7 +1022,7 @@ mod tests {
 
     #[test]
     fn navigation_selects_snapshots_without_leaving_bounds() {
-        let mut app = app_with_snapshots(3);
+        let mut app = browser_app_with_snapshots(3);
 
         assert_eq!(app.selected_snapshot_id(), Some("snap_001"));
 
@@ -843,7 +1045,7 @@ mod tests {
 
     #[test]
     fn empty_snapshot_navigation_is_safe() {
-        let mut app = app_with_snapshots(0);
+        let mut app = browser_app_with_snapshots(0);
 
         app.handle_key(KeyCode::Down);
         app.handle_key(KeyCode::End);
@@ -854,7 +1056,7 @@ mod tests {
 
     #[test]
     fn tab_switches_focus_and_file_navigation_tracks_selected_snapshot() {
-        let mut app = app_with_snapshots(2);
+        let mut app = browser_app_with_snapshots(2);
 
         app.handle_key(KeyCode::Tab);
         app.handle_key(KeyCode::Down);
@@ -876,7 +1078,7 @@ mod tests {
 
     #[test]
     fn file_filter_limits_visible_paths_and_can_clear() {
-        let mut app = app_with_snapshots(1);
+        let mut app = browser_app_with_snapshots(1);
 
         app.handle_key(KeyCode::Char('/'));
         app.handle_key(KeyCode::Char('B'));
@@ -889,7 +1091,7 @@ mod tests {
         );
         assert_eq!(
             app.help_text(),
-            "Tab focus | Up/Down or j/k move | Home/End jump | / filter files | c clear filter | r restore preview | q/Esc quit | ?/F1 hide help"
+            "Backspace menu | Tab focus | Up/Down or j/k move | Home/End jump | / filter files | c clear filter | r restore preview | q/Esc quit | ?/F1 hide help"
         );
 
         app.handle_key(KeyCode::Char('c'));
@@ -900,7 +1102,7 @@ mod tests {
 
     #[test]
     fn restore_preview_defaults_to_snapshot_and_requires_confirmation() {
-        let mut app = app_with_snapshots(1);
+        let mut app = browser_app_with_snapshots(1);
 
         app.handle_key(KeyCode::Char('r'));
 
@@ -938,7 +1140,7 @@ mod tests {
 
     #[test]
     fn restore_preview_does_not_prepare_without_snapshots() {
-        let mut app = app_with_snapshots(0);
+        let mut app = browser_app_with_snapshots(0);
 
         app.handle_key(KeyCode::Char('r'));
 
@@ -949,7 +1151,7 @@ mod tests {
 
     #[test]
     fn file_restore_preview_uses_selected_path_and_clear_target() {
-        let mut app = app_with_snapshots(1);
+        let mut app = browser_app_with_snapshots(1);
 
         app.handle_key(KeyCode::Tab);
         app.handle_key(KeyCode::Down);
@@ -981,7 +1183,7 @@ mod tests {
 
     #[test]
     fn restore_confirmation_blocks_navigation_until_cancelled() {
-        let mut app = app_with_snapshots(2);
+        let mut app = browser_app_with_snapshots(2);
 
         press_keys(&mut app, [KeyCode::Char('r'), KeyCode::Down]);
 
@@ -997,7 +1199,7 @@ mod tests {
 
     #[test]
     fn changing_selection_clears_confirmed_restore_preview() {
-        let mut app = app_with_snapshots(2);
+        let mut app = browser_app_with_snapshots(2);
 
         press_keys(
             &mut app,
@@ -1011,7 +1213,7 @@ mod tests {
 
     #[test]
     fn render_snapshot_browser_includes_selection_and_snapshot_fields() {
-        let mut app = app_with_snapshots(2);
+        let mut app = browser_app_with_snapshots(2);
         app.handle_key(KeyCode::Down);
         let backend = TestBackend::new(130, 20);
         let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
@@ -1029,7 +1231,7 @@ mod tests {
 
     #[test]
     fn detail_panel_follows_selected_snapshot() {
-        let mut app = app_with_snapshots(2);
+        let mut app = browser_app_with_snapshots(2);
         app.handle_key(KeyCode::Down);
         let backend = TestBackend::new(110, 30);
         let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
@@ -1049,7 +1251,7 @@ mod tests {
 
     #[test]
     fn render_file_browser_includes_file_metadata() {
-        let mut app = app_with_snapshots(1);
+        let mut app = browser_app_with_snapshots(1);
         app.handle_key(KeyCode::Tab);
         app.handle_key(KeyCode::Down);
         let backend = TestBackend::new(150, 36);
@@ -1068,7 +1270,7 @@ mod tests {
 
     #[test]
     fn render_restore_preview_includes_target_command_and_safety_text() {
-        let mut app = app_with_snapshots(1);
+        let mut app = browser_app_with_snapshots(1);
         app.handle_key(KeyCode::Char('r'));
         let backend = TestBackend::new(170, 42);
         let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
@@ -1096,6 +1298,7 @@ mod tests {
         let app = app_for_repository(repository).expect("tui app should prepare");
 
         assert_eq!(app.snapshot_count(), 0);
+        assert_eq!(app.view, TuiView::MainMenu);
         assert!(!app.repository_id.is_empty());
     }
 
@@ -1111,11 +1314,12 @@ mod tests {
 
     #[test]
     fn restore_command_quotes_paths_with_spaces() {
-        let app = TuiApp::new(
+        let mut app = TuiApp::new(
             PathBuf::from("./repo with spaces"),
             config(),
             vec![manifest(1)],
         );
+        app.view = TuiView::Browser;
 
         let plan = app
             .build_restore_plan()
@@ -1130,6 +1334,25 @@ mod tests {
                     .display()
             )
         );
+    }
+
+    #[test]
+    fn render_main_menu_includes_guided_actions() {
+        let app = app_with_snapshots(2);
+        let backend = TestBackend::new(140, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+
+        let rendered = render_to_string(&mut terminal, &app);
+
+        assert!(rendered.contains("TraceBack guided terminal"));
+        assert!(rendered.contains("Main Menu"));
+        assert!(rendered.contains("> Browse snapshots"));
+        assert!(rendered.contains("Create backup"));
+        assert!(rendered.contains("coming soon"));
+        assert!(rendered.contains("Restore files"));
+        assert!(rendered.contains("Check repository health"));
+        assert!(rendered.contains("Compare snapshots"));
+        assert!(rendered.contains("Exit"));
     }
 
     fn press_keys<const N: usize>(app: &mut TuiApp, keys: [KeyCode; N]) {
@@ -1157,6 +1380,12 @@ mod tests {
             config(),
             (1..=count).map(manifest).collect(),
         )
+    }
+
+    fn browser_app_with_snapshots(count: usize) -> TuiApp {
+        let mut app = app_with_snapshots(count);
+        app.view = TuiView::Browser;
+        app
     }
 
     fn config() -> RepositoryConfig {

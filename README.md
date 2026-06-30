@@ -13,7 +13,7 @@ It aims to create deduplicated snapshots while making backup behavior easy to in
 - Smart ignore suggestions
 - Repository health reports
 - Optional encryption, filesystem remote push, and pruning
-- Terminal UI snapshot and file browser with selected-entry details
+- Guided terminal UI with snapshot and file browser details
 
 ## Install
 
@@ -79,19 +79,24 @@ remote push
 tui
 ```
 
-Repository initialization, optional encrypted chunk storage, verified local chunk storage behind a storage abstraction, filesystem remote push, staged snapshot manifest publication, metadata-only filesystem scanning, streaming backup and restore, policy-based backup runs, writer locking, interrupted-write recovery, resilience coverage for stale locks and maintenance contention, snapshot listing, full and selected-path restore, timestamp restoration, Unix permission preservation, portable path collision checks, symlink-safe restore containment, restore rehearsal, repository integrity checks with persisted check/rehearsal history, repository doctor findings with a capability-aware reliability score, smart ignore suggestions with reviewed non-destructive application, rich snapshot diffs, backup explanations, repository-wide chunk reference accounting, file/directory storage blame, garbage collection, snapshot pruning, and a terminal snapshot/file browser with detail inspection are implemented.
+Repository initialization, optional encrypted chunk storage, verified local chunk storage behind a storage abstraction, filesystem remote push, staged snapshot manifest publication, metadata-only filesystem scanning, streaming backup and restore, policy-based backup runs, writer locking, interrupted-write recovery, resilience coverage for stale locks and maintenance contention, snapshot listing, full and selected-path restore, timestamp restoration, Unix permission preservation, portable path collision checks, symlink-safe restore containment, restore rehearsal, repository integrity checks with persisted check/rehearsal history, repository doctor findings with a capability-aware reliability score, smart ignore suggestions with reviewed non-destructive application, rich snapshot diffs, backup explanations, repository-wide chunk reference accounting, file/directory storage blame, garbage collection, snapshot pruning, and a guided terminal UI with snapshot/file detail inspection are implemented.
 
-The terminal browser validates a repository and opens a read-only snapshot
-timeline with a file list for the selected snapshot:
+The terminal UI validates a repository and opens a guided main menu:
 
 ```text
 traceback tui --repo ./my-backups
 ```
 
-The TUI shows three panels: snapshots, files in the selected snapshot, and
-details for the selected snapshot or file. Restore support is intentionally a
-preview step: it prepares a normal `traceback restore ...` command and requires
-confirmation, but it does not write files from inside the TUI.
+The main menu lets users choose guided actions such as browsing snapshots,
+previewing restores, checking repository health, comparing snapshots, or
+exiting. Backup, health-check, and diff flows are listed as guided actions and
+will be filled in incrementally.
+
+The snapshot browser shows three panels: snapshots, files in the selected
+snapshot, and details for the selected snapshot or file. Restore support is
+intentionally a preview step: it prepares a normal `traceback restore ...`
+command and requires confirmation, but it does not write files from inside the
+TUI.
 
 TUI keybindings:
 
@@ -99,6 +104,8 @@ TUI keybindings:
 Tab             switch focus between snapshots and files
 Up/Down, j/k    move within the focused panel
 Home/End        jump to the first or last item in the focused panel
+Enter           select a main-menu item
+Backspace       return from the browser to the main menu
 /               start filtering file paths
 Enter           accept the current file filter
 Esc             stop filtering, cancel restore preview, or quit
