@@ -2,7 +2,7 @@ use std::{
     collections::BTreeSet,
     error::Error,
     io::{self, Stdout},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -31,6 +31,10 @@ pub struct TuiApp {
     snapshots: Vec<SnapshotRow>,
     view: TuiView,
     selected_menu_item: usize,
+    status_message: Option<String>,
+    path_input: Option<PathInput>,
+    backup_source: Option<PathBuf>,
+    restore_target: Option<PathBuf>,
     selected_snapshot: usize,
     selected_file: usize,
     focus: TuiFocus,
@@ -46,6 +50,7 @@ pub struct TuiApp {
 enum TuiView {
     MainMenu,
     Browser,
+    PathInput,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +69,7 @@ enum RestoreConfirmation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuAction {
     BrowseSnapshots,
+    ChangeRepository,
     CreateBackup,
     RestoreFiles,
     CheckHealth,
@@ -79,7 +85,7 @@ struct MenuItem {
     enabled: bool,
 }
 
-const MENU_ITEMS: [MenuItem; 6] = [
+const MENU_ITEMS: [MenuItem; 7] = [
     MenuItem {
         label: "Browse snapshots",
         description: "Inspect snapshots, files, metadata, and restore previews.",
@@ -87,10 +93,16 @@ const MENU_ITEMS: [MenuItem; 6] = [
         enabled: true,
     },
     MenuItem {
+        label: "Change repository",
+        description: "Enter another repository path and reload snapshots.",
+        action: MenuAction::ChangeRepository,
+        enabled: true,
+    },
+    MenuItem {
         label: "Create backup",
-        description: "Guided backup flow. Coming next.",
+        description: "Select a source path for the guided backup flow.",
         action: MenuAction::CreateBackup,
-        enabled: false,
+        enabled: true,
     },
     MenuItem {
         label: "Restore files",
@@ -117,6 +129,20 @@ const MENU_ITEMS: [MenuItem; 6] = [
         enabled: true,
     },
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathInputKind {
+    Repository,
+    BackupSource,
+    RestoreTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PathInput {
+    kind: PathInputKind,
+    value: String,
+    error: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SnapshotRow {
@@ -166,6 +192,10 @@ impl TuiApp {
             snapshots,
             view: TuiView::MainMenu,
             selected_menu_item: 0,
+            status_message: None,
+            path_input: None,
+            backup_source: None,
+            restore_target: None,
             selected_snapshot: 0,
             selected_file: 0,
             focus: TuiFocus::Snapshots,
@@ -184,6 +214,11 @@ impl TuiApp {
             return;
         }
 
+        if self.view == TuiView::PathInput {
+            self.handle_path_input_key(code);
+            return;
+        }
+
         if self.filtering_files {
             self.handle_filter_key(code);
             return;
@@ -197,6 +232,7 @@ impl TuiApp {
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Backspace => self.view = TuiView::MainMenu,
+            KeyCode::Char('t') => self.start_path_input(PathInputKind::RestoreTarget),
             KeyCode::Char('?') | KeyCode::F(1) => self.show_help = !self.show_help,
             KeyCode::Tab => self.toggle_focus(),
             KeyCode::Char('r') => self.prepare_restore_plan(),
@@ -234,6 +270,26 @@ impl TuiApp {
         }
     }
 
+    fn handle_path_input_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.cancel_path_input(),
+            KeyCode::Enter => self.accept_path_input(),
+            KeyCode::Backspace => {
+                if let Some(input) = &mut self.path_input {
+                    input.value.pop();
+                    input.error = None;
+                }
+            }
+            KeyCode::Char(character) if !character.is_control() => {
+                if let Some(input) = &mut self.path_input {
+                    input.value.push(character);
+                    input.error = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn handle_restore_confirmation_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -265,6 +321,10 @@ impl TuiApp {
     }
 
     fn help_text(&self) -> String {
+        if self.view == TuiView::PathInput {
+            return "Type path | Enter validate | Backspace edit | Esc cancel".to_owned();
+        }
+
         if self.view == TuiView::MainMenu {
             return if self.show_help {
                 "Up/Down or j/k choose | Enter select | q/Esc quit | ?/F1 hide help".to_owned()
@@ -288,7 +348,7 @@ impl TuiApp {
         }
 
         if self.show_help {
-            "Backspace menu | Tab focus | Up/Down or j/k move | Home/End jump | / filter files | c clear filter | r restore preview | q/Esc quit | ?/F1 hide help".to_owned()
+            "Backspace menu | Tab focus | Up/Down or j/k move | Home/End jump | / filter files | c clear filter | t target | r restore preview | q/Esc quit | ?/F1 hide help".to_owned()
         } else {
             "Backspace menu | ?/F1 help | q/Esc quit".to_owned()
         }
@@ -361,8 +421,101 @@ impl TuiApp {
                     TuiFocus::Snapshots
                 };
             }
+            MenuAction::ChangeRepository => self.start_path_input(PathInputKind::Repository),
+            MenuAction::CreateBackup => self.start_path_input(PathInputKind::BackupSource),
             MenuAction::Quit => self.should_quit = true,
-            MenuAction::CreateBackup | MenuAction::CheckHealth | MenuAction::CompareSnapshots => {}
+            MenuAction::CheckHealth | MenuAction::CompareSnapshots => {}
+        }
+    }
+
+    fn start_path_input(&mut self, kind: PathInputKind) {
+        let value = match kind {
+            PathInputKind::Repository => self.repository.display().to_string(),
+            PathInputKind::BackupSource => self
+                .backup_source
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            PathInputKind::RestoreTarget => self
+                .restore_target
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+        };
+        self.path_input = Some(PathInput {
+            kind,
+            value,
+            error: None,
+        });
+        self.status_message = None;
+        self.view = TuiView::PathInput;
+    }
+
+    fn cancel_path_input(&mut self) {
+        self.path_input = None;
+        self.view = TuiView::MainMenu;
+        self.status_message = Some("Path entry cancelled.".to_owned());
+    }
+
+    fn accept_path_input(&mut self) {
+        let Some(input) = self.path_input.clone() else {
+            self.view = TuiView::MainMenu;
+            return;
+        };
+        let path = PathBuf::from(input.value.trim());
+        match self.validate_and_store_path(input.kind, &path) {
+            Ok(message) => {
+                self.path_input = None;
+                self.view = TuiView::MainMenu;
+                self.status_message = Some(message);
+            }
+            Err(error) => {
+                if let Some(input) = &mut self.path_input {
+                    input.error = Some(error);
+                }
+            }
+        }
+    }
+
+    fn validate_and_store_path(
+        &mut self,
+        kind: PathInputKind,
+        path: &Path,
+    ) -> Result<String, String> {
+        if path.as_os_str().is_empty() {
+            return Err("path must not be empty".to_owned());
+        }
+
+        match kind {
+            PathInputKind::Repository => {
+                let config = validate_repository(path).map_err(|error| error.to_string())?;
+                let manifests = list_manifests(path).map_err(|error| error.to_string())?;
+                self.repository = path.to_owned();
+                self.repository_id = config.repository_id;
+                self.snapshots = manifests.into_iter().map(SnapshotRow::from).collect();
+                self.selected_snapshot = 0;
+                self.selected_file = 0;
+                self.clear_restore_plan();
+                Ok(format!("Repository loaded: {}", path.display()))
+            }
+            PathInputKind::BackupSource => {
+                if !path.exists() {
+                    return Err("source path does not exist".to_owned());
+                }
+                self.backup_source = Some(path.to_owned());
+                Ok(format!("Backup source selected: {}", path.display()))
+            }
+            PathInputKind::RestoreTarget => {
+                if let Some(parent) = path.parent()
+                    && !parent.as_os_str().is_empty()
+                    && !parent.exists()
+                {
+                    return Err("restore target parent does not exist".to_owned());
+                }
+                self.restore_target = Some(path.to_owned());
+                self.clear_restore_plan();
+                Ok(format!("Restore target selected: {}", path.display()))
+            }
         }
     }
 
@@ -388,6 +541,7 @@ impl TuiApp {
             None
         };
         let target = restore_target(&snapshot.snapshot_id, selected_path.as_deref());
+        let target = self.restore_target.clone().unwrap_or(target);
         let snapshot_expression = selected_path
             .as_ref()
             .map(|path| format!("{}:{path}", snapshot.snapshot_id))
@@ -609,10 +763,9 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
         ])
         .split(area);
 
-    let title_text = if app.view == TuiView::MainMenu {
-        " guided terminal"
-    } else {
-        " terminal browser"
+    let title_text = match app.view {
+        TuiView::Browser => " terminal browser",
+        TuiView::MainMenu | TuiView::PathInput => " guided terminal",
     };
     let title = Paragraph::new(Line::from(vec![
         Span::styled("TraceBack", Style::default().add_modifier(Modifier::BOLD)),
@@ -622,7 +775,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(title, chunks[0]);
 
-    let body = Paragraph::new(vec![
+    let mut overview_lines = vec![
         Line::from(format!("Repository: {}", app.repository.display())),
         Line::from(format!("Repository ID: {}", app.repository_id)),
         Line::from(format!(
@@ -632,10 +785,28 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
                 .map(|snapshot| format!(" | selected: {snapshot}"))
                 .unwrap_or_default()
         )),
-    ])
-    .wrap(Wrap { trim: true })
-    .block(Block::default().title("Overview").borders(Borders::ALL));
+    ];
+    if let Some(status) = &app.status_message {
+        overview_lines.push(Line::from(format!("Status: {status}")));
+    }
+
+    let body = Paragraph::new(overview_lines)
+        .wrap(Wrap { trim: true })
+        .block(Block::default().title("Overview").borders(Borders::ALL));
     frame.render_widget(body, chunks[1]);
+
+    if app.view == TuiView::PathInput {
+        let input = Paragraph::new(path_input_lines(app))
+            .wrap(Wrap { trim: false })
+            .block(Block::default().title("Path Input").borders(Borders::ALL));
+        frame.render_widget(input, chunks[2]);
+
+        let footer = Paragraph::new(app.help_text())
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL));
+        frame.render_widget(footer, chunks[3]);
+        return;
+    }
 
     if app.view == TuiView::MainMenu {
         let menu = Paragraph::new(menu_lines(app))
@@ -709,9 +880,52 @@ fn menu_lines(app: &TuiApp) -> Vec<Line<'static>> {
     }));
 
     lines.push(Line::from(""));
+    if let Some(source) = &app.backup_source {
+        lines.push(Line::from(format!("Backup source: {}", source.display())));
+    }
+    if let Some(target) = &app.restore_target {
+        lines.push(Line::from(format!("Restore target: {}", target.display())));
+    }
+    if let Some(status) = &app.status_message {
+        lines.push(Line::from(format!("Status: {status}")));
+    }
+    lines.push(Line::from(""));
     lines.push(Line::from(
         "Tip: start with Browse snapshots for the current repository.",
     ));
+    lines
+}
+
+fn path_input_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    let Some(input) = &app.path_input else {
+        return vec![Line::from("No path input is active.")];
+    };
+
+    let (title, description) = match input.kind {
+        PathInputKind::Repository => (
+            "Repository path",
+            "Enter a TraceBack repository path. The TUI will validate and reload it.",
+        ),
+        PathInputKind::BackupSource => (
+            "Backup source path",
+            "Enter an existing file or directory to use for the guided backup flow.",
+        ),
+        PathInputKind::RestoreTarget => (
+            "Restore target path",
+            "Enter a restore target path. Existing targets are not written from this screen.",
+        ),
+    };
+
+    let mut lines = vec![
+        Line::from(title),
+        Line::from(description),
+        Line::from(""),
+        Line::from(format!("> {}", input.value)),
+    ];
+    if let Some(error) = &input.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!("Error: {error}")));
+    }
     lines
 }
 
@@ -976,7 +1190,10 @@ mod tests {
         assert_eq!(app.focus, TuiFocus::Snapshots);
 
         app.handle_key(KeyCode::Backspace);
-        press_keys(&mut app, [KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+        press_keys(
+            &mut app,
+            [KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter],
+        );
 
         assert_eq!(app.view, TuiView::Browser);
         assert_eq!(app.focus, TuiFocus::Files);
@@ -986,10 +1203,121 @@ mod tests {
     fn disabled_main_menu_items_do_not_leave_menu() {
         let mut app = app_with_snapshots(1);
 
-        press_keys(&mut app, [KeyCode::Down, KeyCode::Enter]);
+        press_keys(
+            &mut app,
+            [
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Enter,
+            ],
+        );
 
         assert_eq!(app.view, TuiView::MainMenu);
         assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn path_input_can_cancel_back_to_menu() {
+        let mut app = app_with_snapshots(1);
+
+        press_keys(&mut app, [KeyCode::Down, KeyCode::Enter, KeyCode::Esc]);
+
+        assert_eq!(app.view, TuiView::MainMenu);
+        assert!(app.path_input.is_none());
+        assert_eq!(app.status_message.as_deref(), Some("Path entry cancelled."));
+    }
+
+    #[test]
+    fn repository_path_input_validates_and_reloads_snapshots() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        let mut app = app_with_snapshots(1);
+
+        press_keys(&mut app, [KeyCode::Down, KeyCode::Enter]);
+        replace_input(&mut app, &repository.display().to_string());
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.view, TuiView::MainMenu);
+        assert_eq!(app.repository, repository);
+        assert_eq!(app.snapshot_count(), 0);
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Repository loaded:"))
+        );
+    }
+
+    #[test]
+    fn repository_path_input_reports_validation_errors() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let mut app = app_with_snapshots(1);
+
+        press_keys(&mut app, [KeyCode::Down, KeyCode::Enter]);
+        replace_input(
+            &mut app,
+            &temporary.path().join("missing").display().to_string(),
+        );
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.view, TuiView::PathInput);
+        assert!(
+            app.path_input
+                .as_ref()
+                .and_then(|input| input.error.as_deref())
+                .is_some_and(|error| error.contains("config"))
+        );
+    }
+
+    #[test]
+    fn source_and_target_path_inputs_store_valid_paths() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let source = temporary.path().join("source");
+        std::fs::create_dir(&source).expect("source should be created");
+        let target = temporary.path().join("restore-target");
+        let mut app = app_with_snapshots(1);
+
+        press_keys(&mut app, [KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+        replace_input(&mut app, &source.display().to_string());
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.backup_source.as_deref(), Some(source.as_path()));
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Backup source selected:"))
+        );
+
+        app.view = TuiView::Browser;
+        app.handle_key(KeyCode::Char('t'));
+        replace_input(&mut app, &target.display().to_string());
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.restore_target.as_deref(), Some(target.as_path()));
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Restore target selected:"))
+        );
+    }
+
+    #[test]
+    fn path_input_renders_prompt_and_error() {
+        let mut app = app_with_snapshots(1);
+        press_keys(&mut app, [KeyCode::Down, KeyCode::Enter]);
+        replace_input(&mut app, "");
+        app.handle_key(KeyCode::Enter);
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+
+        let rendered = render_to_string(&mut terminal, &app);
+
+        assert!(rendered.contains("TraceBack guided terminal"));
+        assert!(rendered.contains("Path Input"));
+        assert!(rendered.contains("Repository path"));
+        assert!(rendered.contains("Error: path must not be empty"));
     }
 
     #[test]
@@ -1091,7 +1419,7 @@ mod tests {
         );
         assert_eq!(
             app.help_text(),
-            "Backspace menu | Tab focus | Up/Down or j/k move | Home/End jump | / filter files | c clear filter | r restore preview | q/Esc quit | ?/F1 hide help"
+            "Backspace menu | Tab focus | Up/Down or j/k move | Home/End jump | / filter files | c clear filter | t target | r restore preview | q/Esc quit | ?/F1 hide help"
         );
 
         app.handle_key(KeyCode::Char('c'));
@@ -1347,6 +1675,7 @@ mod tests {
         assert!(rendered.contains("TraceBack guided terminal"));
         assert!(rendered.contains("Main Menu"));
         assert!(rendered.contains("> Browse snapshots"));
+        assert!(rendered.contains("Change repository"));
         assert!(rendered.contains("Create backup"));
         assert!(rendered.contains("coming soon"));
         assert!(rendered.contains("Restore files"));
@@ -1359,6 +1688,16 @@ mod tests {
         for key in keys {
             app.handle_key(key);
         }
+    }
+
+    fn replace_input(app: &mut TuiApp, value: &str) {
+        let input = app
+            .path_input
+            .as_mut()
+            .expect("path input should be active");
+        input.value.clear();
+        input.value.push_str(value);
+        input.error = None;
     }
 
     fn render_to_string(terminal: &mut Terminal<TestBackend>, app: &TuiApp) -> String {

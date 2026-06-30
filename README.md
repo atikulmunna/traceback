@@ -87,10 +87,11 @@ The terminal UI validates a repository and opens a guided main menu:
 traceback tui --repo ./my-backups
 ```
 
-The main menu lets users choose guided actions such as browsing snapshots,
-previewing restores, checking repository health, comparing snapshots, or
-exiting. Backup, health-check, and diff flows are listed as guided actions and
-will be filled in incrementally.
+The main menu lets users choose guided actions such as changing the repository,
+selecting a backup source, browsing snapshots, previewing restores, checking
+repository health, comparing snapshots, or exiting. Backup, health-check, and
+diff execution flows are listed as guided actions and will be filled in
+incrementally.
 
 The snapshot browser shows three panels: snapshots, files in the selected
 snapshot, and details for the selected snapshot or file. Restore support is
@@ -108,6 +109,7 @@ Enter           select a main-menu item
 Backspace       return from the browser to the main menu
 /               start filtering file paths
 Enter           accept the current file filter
+t               enter a restore target path from the browser
 Esc             stop filtering, cancel restore preview, or quit
 c               clear the file filter while the file panel is focused
 r               preview a restore command for the focused snapshot/file
