@@ -20,8 +20,8 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 use traceback_repo::{
-    FileType, RepositoryConfig, RepositoryError, SnapshotManifest, list_manifests,
-    restore_snapshot, restore_snapshot_path, validate_repository,
+    CheckReport, FileType, RepositoryConfig, RepositoryError, SnapshotManifest, check_repository,
+    list_manifests, restore_snapshot, restore_snapshot_path, validate_repository,
 };
 
 use crate::{BackupRequest, run_backup};
@@ -39,6 +39,7 @@ pub struct TuiApp {
     backup_result: Option<BackupRunSummary>,
     restore_target: Option<PathBuf>,
     restore_result: Option<RestoreRunSummary>,
+    health_report: Option<HealthCheckSummary>,
     selected_snapshot: usize,
     selected_file: usize,
     focus: TuiFocus,
@@ -56,6 +57,7 @@ enum TuiView {
     Browser,
     PathInput,
     BackupReview,
+    HealthCheck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,9 +119,9 @@ const MENU_ITEMS: [MenuItem; 7] = [
     },
     MenuItem {
         label: "Check repository health",
-        description: "Guided integrity and health check. Coming soon.",
+        description: "Run integrity checks and review findings.",
         action: MenuAction::CheckHealth,
-        enabled: false,
+        enabled: true,
     },
     MenuItem {
         label: "Compare snapshots",
@@ -164,6 +166,35 @@ struct RestoreRunSummary {
     directories: u64,
     symlinks: u64,
     bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HealthCheckSummary {
+    passed: bool,
+    manifests_checked: usize,
+    chunks_verified: usize,
+    orphaned_chunks: usize,
+    staging_leftovers: usize,
+    temporary_chunk_files: usize,
+    issues: Vec<String>,
+}
+
+impl From<CheckReport> for HealthCheckSummary {
+    fn from(report: CheckReport) -> Self {
+        Self {
+            passed: report.passed(),
+            manifests_checked: report.manifests_checked,
+            chunks_verified: report.chunks_verified,
+            orphaned_chunks: report.orphaned_chunks,
+            staging_leftovers: report.abandoned_staging_entries,
+            temporary_chunk_files: report.temporary_chunk_files,
+            issues: report
+                .issues
+                .into_iter()
+                .map(|issue| issue.to_string())
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,6 +251,7 @@ impl TuiApp {
             backup_result: None,
             restore_target: None,
             restore_result: None,
+            health_report: None,
             selected_snapshot: 0,
             selected_file: 0,
             focus: TuiFocus::Snapshots,
@@ -245,6 +277,11 @@ impl TuiApp {
 
         if self.view == TuiView::BackupReview {
             self.handle_backup_review_key(code);
+            return;
+        }
+
+        if self.view == TuiView::HealthCheck {
+            self.handle_health_check_key(code);
             return;
         }
 
@@ -332,6 +369,16 @@ impl TuiApp {
         }
     }
 
+    fn handle_health_check_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.run_health_check(),
+            KeyCode::Backspace | KeyCode::Esc => self.view = TuiView::MainMenu,
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = !self.show_help,
+            _ => {}
+        }
+    }
+
     fn handle_restore_confirmation_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Char('y') | KeyCode::Char('Y') => self.run_guided_restore(),
@@ -367,6 +414,10 @@ impl TuiApp {
 
         if self.view == TuiView::BackupReview {
             return "Enter run backup | e edit source | Backspace/Esc menu | q quit".to_owned();
+        }
+
+        if self.view == TuiView::HealthCheck {
+            return "Enter rerun check | Backspace/Esc menu | q quit".to_owned();
         }
 
         if self.view == TuiView::MainMenu {
@@ -472,8 +523,12 @@ impl TuiApp {
                     self.start_path_input(PathInputKind::BackupSource);
                 }
             }
+            MenuAction::CheckHealth => {
+                self.view = TuiView::HealthCheck;
+                self.run_health_check();
+            }
             MenuAction::Quit => self.should_quit = true,
-            MenuAction::CheckHealth | MenuAction::CompareSnapshots => {}
+            MenuAction::CompareSnapshots => {}
         }
     }
 
@@ -691,6 +746,17 @@ impl TuiApp {
         }
     }
 
+    fn run_health_check(&mut self) {
+        let report = check_repository(&self.repository);
+        let passed = report.passed();
+        self.health_report = Some(HealthCheckSummary::from(report));
+        self.status_message = Some(if passed {
+            "Repository health check passed.".to_owned()
+        } else {
+            "Repository health check found issues.".to_owned()
+        });
+    }
+
     fn select_next(&mut self) {
         match self.focus {
             TuiFocus::Snapshots => self.select_next_snapshot(),
@@ -895,7 +961,9 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
 
     let title_text = match app.view {
         TuiView::Browser => " terminal browser",
-        TuiView::MainMenu | TuiView::PathInput | TuiView::BackupReview => " guided terminal",
+        TuiView::MainMenu | TuiView::PathInput | TuiView::BackupReview | TuiView::HealthCheck => {
+            " guided terminal"
+        }
     };
     let title = Paragraph::new(Line::from(vec![
         Span::styled("TraceBack", Style::default().add_modifier(Modifier::BOLD)),
@@ -947,6 +1015,23 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
                     .borders(Borders::ALL),
             );
         frame.render_widget(review, chunks[2]);
+
+        let footer = Paragraph::new(app.help_text())
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL));
+        frame.render_widget(footer, chunks[3]);
+        return;
+    }
+
+    if app.view == TuiView::HealthCheck {
+        let health = Paragraph::new(health_check_lines(app))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title("Repository Health")
+                    .borders(Borders::ALL),
+            );
+        frame.render_widget(health, chunks[2]);
 
         let footer = Paragraph::new(app.help_text())
             .alignment(Alignment::Center)
@@ -1107,6 +1192,59 @@ fn backup_review_lines(app: &TuiApp) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
         lines.push(Line::from(format!("Status: {status}")));
     }
+    lines
+}
+
+fn health_check_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    let Some(report) = &app.health_report else {
+        return vec![
+            Line::from("Repository health check has not run yet."),
+            Line::from("Press Enter to run it now."),
+        ];
+    };
+
+    let result = if report.passed { "PASS" } else { "FAIL" };
+    let mut lines = vec![
+        Line::from("Repository health check"),
+        Line::from(""),
+        Line::from(format!("Result: {result}")),
+        Line::from(format!("Manifests checked: {}", report.manifests_checked)),
+        Line::from(format!("Chunks verified: {}", report.chunks_verified)),
+        Line::from(format!("Orphaned chunks: {}", report.orphaned_chunks)),
+        Line::from(format!("Staging leftovers: {}", report.staging_leftovers)),
+        Line::from(format!(
+            "Temporary chunks: {}",
+            report.temporary_chunk_files
+        )),
+        Line::from(""),
+    ];
+
+    if report.issues.is_empty() {
+        lines.push(Line::from("No issues found."));
+        lines.push(Line::from(
+            "Recommendation: keep regular backups and rehearse restores.",
+        ));
+    } else {
+        lines.push(Line::from("Issues:"));
+        lines.extend(
+            report
+                .issues
+                .iter()
+                .take(8)
+                .map(|issue| Line::from(format!("- {issue}"))),
+        );
+        if report.issues.len() > 8 {
+            lines.push(Line::from(format!(
+                "... {} more issue(s)",
+                report.issues.len() - 8
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "Recommendation: run recover or inspect the listed paths.",
+        ));
+    }
+
     lines
 }
 
@@ -1398,8 +1536,31 @@ mod tests {
     }
 
     #[test]
-    fn disabled_main_menu_items_do_not_leave_menu() {
+    fn disabled_compare_menu_item_does_not_leave_menu() {
         let mut app = app_with_snapshots(1);
+
+        press_keys(
+            &mut app,
+            [
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Enter,
+            ],
+        );
+
+        assert_eq!(app.view, TuiView::MainMenu);
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn health_check_menu_runs_repository_check() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        let mut app = app_for_repository(repository).expect("app should load repository");
 
         press_keys(
             &mut app,
@@ -1412,8 +1573,20 @@ mod tests {
             ],
         );
 
+        assert_eq!(app.view, TuiView::HealthCheck);
+        let report = app
+            .health_report
+            .as_ref()
+            .expect("health report should be recorded");
+        assert!(report.passed);
+        assert_eq!(report.manifests_checked, 0);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Repository health check passed.")
+        );
+
+        app.handle_key(KeyCode::Backspace);
         assert_eq!(app.view, TuiView::MainMenu);
-        assert!(!app.should_quit());
     }
 
     #[test]
@@ -1901,6 +2074,27 @@ mod tests {
                 .display()
         )));
         assert!(rendered.contains("Command: traceback restore snap_001"));
+    }
+
+    #[test]
+    fn render_health_check_includes_result_and_counts() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        let mut app = app_for_repository(repository).expect("app should load repository");
+        app.view = TuiView::HealthCheck;
+        app.run_health_check();
+        let backend = TestBackend::new(130, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+
+        let rendered = render_to_string(&mut terminal, &app);
+
+        assert!(rendered.contains("Repository Health"));
+        assert!(rendered.contains("Result: PASS"));
+        assert!(rendered.contains("Manifests checked: 0"));
+        assert!(rendered.contains("Chunks verified: 0"));
+        assert!(rendered.contains("No issues found."));
+        assert!(rendered.contains("Enter rerun check"));
     }
 
     #[test]

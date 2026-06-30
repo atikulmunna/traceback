@@ -89,15 +89,18 @@ traceback tui --repo ./my-backups
 
 The main menu lets users choose guided actions such as changing the repository,
 running a backup from a selected source, browsing snapshots, restoring files,
-checking repository health, comparing snapshots, or exiting. Health-check and
-diff execution flows are listed as guided actions and will be filled in
-incrementally.
+checking repository health, comparing snapshots, or exiting. The diff execution
+flow is listed as a guided action and will be filled in incrementally.
 
 The snapshot browser shows three panels: snapshots, files in the selected
 snapshot, and details for the selected snapshot or file. Restore support previews
 the exact target and equivalent `traceback restore ...` command first. The TUI
 only writes after an explicit target is entered with `t` and the restore is
 confirmed with `y`.
+
+The repository health screen runs the same integrity check as `traceback check`
+and shows pass/fail status, verified manifest and chunk counts, staging or
+temporary leftovers, orphaned chunks, and issue guidance.
 
 TUI keybindings:
 
@@ -106,6 +109,7 @@ Tab             switch focus between snapshots and files
 Up/Down, j/k    move within the focused panel
 Home/End        jump to the first or last item in the focused panel
 Enter           select a main-menu item
+Enter           rerun the repository health check on the health screen
 Backspace       return from the browser to the main menu
 e               edit the backup source on the backup review screen
 /               start filtering file paths
