@@ -302,6 +302,13 @@ impl TuiApp {
         }
     }
 
+    pub(crate) fn set_backup_source(&mut self, source: PathBuf) {
+        self.backup_source = Some(source.clone());
+        self.backup_result = None;
+        self.status_message = Some(format!("Backup source selected: {}", source.display()));
+        self.view = TuiView::BackupReview;
+    }
+
     fn handle_key(&mut self, code: KeyCode) {
         if self.view == TuiView::MainMenu {
             self.handle_main_menu_key(code);
@@ -1885,6 +1892,20 @@ mod tests {
         assert_eq!(app.view, TuiView::MainMenu);
         assert!(app.path_input.is_none());
         assert_eq!(app.status_message.as_deref(), Some("Path entry cancelled."));
+    }
+
+    #[test]
+    fn initial_backup_source_opens_backup_review() {
+        let mut app = app_with_snapshots(1);
+
+        app.set_backup_source(PathBuf::from("./source"));
+
+        assert_eq!(app.view, TuiView::BackupReview);
+        assert_eq!(app.backup_source, Some(PathBuf::from("./source")));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Backup source selected: ./source")
+        );
     }
 
     #[test]

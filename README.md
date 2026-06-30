@@ -87,6 +87,13 @@ The terminal UI validates a repository and opens a guided main menu:
 traceback tui --repo ./my-backups
 ```
 
+To skip typing a long backup source path inside the terminal UI, launch it with
+the source prefilled:
+
+```text
+traceback tui --repo ./my-backups --source ./documents
+```
+
 The main menu lets users choose guided actions such as changing the repository,
 running a backup from a selected source, browsing snapshots, restoring files,
 checking repository health, comparing snapshots, or exiting.

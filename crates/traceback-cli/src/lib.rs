@@ -199,6 +199,10 @@ pub enum Command {
         /// Backup repository directory.
         #[arg(long)]
         repo: PathBuf,
+
+        /// Optional backup source to prefill and open on the backup review screen.
+        #[arg(long)]
+        source: Option<PathBuf>,
     },
 }
 
@@ -657,11 +661,20 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 println!("Copied bytes:         {} B", report.copied_bytes);
             }
         }
-        Command::Tui { repo } => {
+        Command::Tui { repo, source } => {
             if json {
                 return Err("tui does not support --json".into());
             }
-            tui::run(tui::app_for_repository(repo)?)?;
+            let mut app = tui::app_for_repository(repo)?;
+            if let Some(source) = source {
+                if !source.exists() {
+                    return Err(
+                        format!("backup source does not exist: {}", source.display()).into(),
+                    );
+                }
+                app.set_backup_source(source);
+            }
+            tui::run(app)?;
         }
     }
 
@@ -1687,6 +1700,14 @@ mod tests {
             vec!["traceback", "check", "--repo", "./repo"],
             vec!["traceback", "recover", "--repo", "./repo"],
             vec!["traceback", "tui", "--repo", "./repo"],
+            vec![
+                "traceback",
+                "tui",
+                "--repo",
+                "./repo",
+                "--source",
+                "./source",
+            ],
         ];
 
         for args in cases {
