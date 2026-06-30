@@ -88,8 +88,8 @@ traceback tui --repo ./my-backups
 ```
 
 The main menu lets users choose guided actions such as changing the repository,
-selecting a backup source, browsing snapshots, previewing restores, checking
-repository health, comparing snapshots, or exiting. Backup, health-check, and
+running a backup from a selected source, browsing snapshots, previewing restores,
+checking repository health, comparing snapshots, or exiting. Health-check and
 diff execution flows are listed as guided actions and will be filled in
 incrementally.
 
@@ -107,6 +107,7 @@ Up/Down, j/k    move within the focused panel
 Home/End        jump to the first or last item in the focused panel
 Enter           select a main-menu item
 Backspace       return from the browser to the main menu
+e               edit the backup source on the backup review screen
 /               start filtering file paths
 Enter           accept the current file filter
 t               enter a restore target path from the browser

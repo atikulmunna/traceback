@@ -24,6 +24,8 @@ use traceback_repo::{
     validate_repository,
 };
 
+use crate::{BackupRequest, run_backup};
+
 #[derive(Debug)]
 pub struct TuiApp {
     repository: PathBuf,
@@ -34,6 +36,7 @@ pub struct TuiApp {
     status_message: Option<String>,
     path_input: Option<PathInput>,
     backup_source: Option<PathBuf>,
+    backup_result: Option<BackupRunSummary>,
     restore_target: Option<PathBuf>,
     selected_snapshot: usize,
     selected_file: usize,
@@ -51,6 +54,7 @@ enum TuiView {
     MainMenu,
     Browser,
     PathInput,
+    BackupReview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +149,15 @@ struct PathInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct BackupRunSummary {
+    snapshot_id: String,
+    files_scanned: u64,
+    logical_bytes: u64,
+    newly_stored_bytes: u64,
+    warning_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SnapshotRow {
     snapshot_id: String,
     created_at: String,
@@ -195,6 +208,7 @@ impl TuiApp {
             status_message: None,
             path_input: None,
             backup_source: None,
+            backup_result: None,
             restore_target: None,
             selected_snapshot: 0,
             selected_file: 0,
@@ -216,6 +230,11 @@ impl TuiApp {
 
         if self.view == TuiView::PathInput {
             self.handle_path_input_key(code);
+            return;
+        }
+
+        if self.view == TuiView::BackupReview {
+            self.handle_backup_review_key(code);
             return;
         }
 
@@ -290,6 +309,19 @@ impl TuiApp {
         }
     }
 
+    fn handle_backup_review_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.run_guided_backup(),
+            KeyCode::Char('e') | KeyCode::Char('E') => {
+                self.start_path_input(PathInputKind::BackupSource);
+            }
+            KeyCode::Backspace | KeyCode::Esc => self.view = TuiView::MainMenu,
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = !self.show_help,
+            _ => {}
+        }
+    }
+
     fn handle_restore_confirmation_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -323,6 +355,10 @@ impl TuiApp {
     fn help_text(&self) -> String {
         if self.view == TuiView::PathInput {
             return "Type path | Enter validate | Backspace edit | Esc cancel".to_owned();
+        }
+
+        if self.view == TuiView::BackupReview {
+            return "Enter run backup | e edit source | Backspace/Esc menu | q quit".to_owned();
         }
 
         if self.view == TuiView::MainMenu {
@@ -422,7 +458,13 @@ impl TuiApp {
                 };
             }
             MenuAction::ChangeRepository => self.start_path_input(PathInputKind::Repository),
-            MenuAction::CreateBackup => self.start_path_input(PathInputKind::BackupSource),
+            MenuAction::CreateBackup => {
+                if self.backup_source.is_some() {
+                    self.view = TuiView::BackupReview;
+                } else {
+                    self.start_path_input(PathInputKind::BackupSource);
+                }
+            }
             MenuAction::Quit => self.should_quit = true,
             MenuAction::CheckHealth | MenuAction::CompareSnapshots => {}
         }
@@ -466,7 +508,10 @@ impl TuiApp {
         match self.validate_and_store_path(input.kind, &path) {
             Ok(message) => {
                 self.path_input = None;
-                self.view = TuiView::MainMenu;
+                self.view = match input.kind {
+                    PathInputKind::BackupSource => TuiView::BackupReview,
+                    PathInputKind::Repository | PathInputKind::RestoreTarget => TuiView::MainMenu,
+                };
                 self.status_message = Some(message);
             }
             Err(error) => {
@@ -503,6 +548,7 @@ impl TuiApp {
                     return Err("source path does not exist".to_owned());
                 }
                 self.backup_source = Some(path.to_owned());
+                self.backup_result = None;
                 Ok(format!("Backup source selected: {}", path.display()))
             }
             PathInputKind::RestoreTarget => {
@@ -515,6 +561,48 @@ impl TuiApp {
                 self.restore_target = Some(path.to_owned());
                 self.clear_restore_plan();
                 Ok(format!("Restore target selected: {}", path.display()))
+            }
+        }
+    }
+
+    fn run_guided_backup(&mut self) {
+        let Some(source) = self.backup_source.clone() else {
+            self.status_message = Some("Select a backup source before running backup.".to_owned());
+            self.start_path_input(PathInputKind::BackupSource);
+            return;
+        };
+
+        match run_backup(BackupRequest {
+            paths: vec![source],
+            repo: self.repository.clone(),
+            policy_ignore_patterns: Vec::new(),
+            fail_on_changed_file: false,
+        }) {
+            Ok(result) => {
+                self.backup_result = Some(BackupRunSummary {
+                    snapshot_id: result.snapshot_id.clone(),
+                    files_scanned: result.files_scanned,
+                    logical_bytes: result.logical_bytes,
+                    newly_stored_bytes: result.newly_stored_bytes,
+                    warning_count: result.warning_count,
+                });
+                match list_manifests(&self.repository) {
+                    Ok(manifests) => {
+                        self.snapshots = manifests.into_iter().map(SnapshotRow::from).collect();
+                        self.selected_snapshot = self.snapshots.len().saturating_sub(1);
+                        self.selected_file = 0;
+                        self.status_message =
+                            Some(format!("Backup completed: {}", result.snapshot_id));
+                    }
+                    Err(error) => {
+                        self.status_message = Some(format!(
+                            "Backup completed, but snapshots could not reload: {error}"
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                self.status_message = Some(format!("Backup failed: {error}"));
             }
         }
     }
@@ -765,7 +853,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
 
     let title_text = match app.view {
         TuiView::Browser => " terminal browser",
-        TuiView::MainMenu | TuiView::PathInput => " guided terminal",
+        TuiView::MainMenu | TuiView::PathInput | TuiView::BackupReview => " guided terminal",
     };
     let title = Paragraph::new(Line::from(vec![
         Span::styled("TraceBack", Style::default().add_modifier(Modifier::BOLD)),
@@ -800,6 +888,23 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
             .wrap(Wrap { trim: false })
             .block(Block::default().title("Path Input").borders(Borders::ALL));
         frame.render_widget(input, chunks[2]);
+
+        let footer = Paragraph::new(app.help_text())
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL));
+        frame.render_widget(footer, chunks[3]);
+        return;
+    }
+
+    if app.view == TuiView::BackupReview {
+        let review = Paragraph::new(backup_review_lines(app))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title("Backup Review")
+                    .borders(Borders::ALL),
+            );
+        frame.render_widget(review, chunks[2]);
 
         let footer = Paragraph::new(app.help_text())
             .alignment(Alignment::Center)
@@ -925,6 +1030,40 @@ fn path_input_lines(app: &TuiApp) -> Vec<Line<'static>> {
     if let Some(error) = &input.error {
         lines.push(Line::from(""));
         lines.push(Line::from(format!("Error: {error}")));
+    }
+    lines
+}
+
+fn backup_review_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    let source = app
+        .backup_source
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<not selected>".to_owned());
+    let mut lines = vec![
+        Line::from("Review backup plan."),
+        Line::from(""),
+        Line::from(format!("Repository: {}", app.repository.display())),
+        Line::from(format!("Source: {source}")),
+        Line::from("Mode: retry changed files, warn if they keep changing"),
+        Line::from(""),
+        Line::from("Press Enter to run backup, or e to edit source."),
+    ];
+
+    if let Some(result) = &app.backup_result {
+        lines.extend([
+            Line::from(""),
+            Line::from("Last backup result:"),
+            Line::from(format!("Snapshot: {}", result.snapshot_id)),
+            Line::from(format!("Files scanned: {}", result.files_scanned)),
+            Line::from(format!("Logical: {} B", result.logical_bytes)),
+            Line::from(format!("Stored: {} B", result.newly_stored_bytes)),
+            Line::from(format!("Warnings: {}", result.warning_count)),
+        ]);
+    }
+    if let Some(status) = &app.status_message {
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!("Status: {status}")));
     }
     lines
 }
@@ -1159,7 +1298,10 @@ mod tests {
         FileEntry, FileType, RepositoryConfig, SnapshotManifest, init_repository,
     };
 
-    use super::{RestoreConfirmation, TuiApp, TuiFocus, TuiView, app_for_repository, render};
+    use super::{
+        BackupRunSummary, RestoreConfirmation, TuiApp, TuiFocus, TuiView, app_for_repository,
+        render,
+    };
 
     #[test]
     fn app_starts_on_main_menu_and_quits_on_q_or_escape() {
@@ -1284,6 +1426,7 @@ mod tests {
         app.handle_key(KeyCode::Enter);
 
         assert_eq!(app.backup_source.as_deref(), Some(source.as_path()));
+        assert_eq!(app.view, TuiView::BackupReview);
         assert!(
             app.status_message
                 .as_deref()
@@ -1301,6 +1444,57 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.starts_with("Restore target selected:"))
         );
+    }
+
+    #[test]
+    fn guided_backup_flow_runs_backup_and_reloads_snapshots() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let source = temporary.path().join("source");
+        std::fs::create_dir(&source).expect("source should be created");
+        std::fs::write(source.join("hello.txt"), "hello").expect("source file should be written");
+        init_repository(&repository).expect("repository should initialize");
+        let mut app = app_for_repository(repository).expect("app should load repository");
+
+        press_keys(&mut app, [KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+        replace_input(&mut app, &source.display().to_string());
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(app.view, TuiView::BackupReview);
+
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.snapshot_count(), 1);
+        assert!(app.backup_result.is_some());
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Backup completed: snap_"))
+        );
+        assert!(app.selected_snapshot_id().is_some());
+    }
+
+    #[test]
+    fn render_backup_review_includes_plan_and_result() {
+        let mut app = app_with_snapshots(1);
+        app.view = TuiView::BackupReview;
+        app.backup_source = Some(PathBuf::from("./source"));
+        app.backup_result = Some(BackupRunSummary {
+            snapshot_id: "snap_result".to_owned(),
+            files_scanned: 2,
+            logical_bytes: 35,
+            newly_stored_bytes: 20,
+            warning_count: 0,
+        });
+        let backend = TestBackend::new(140, 32);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+
+        let rendered = render_to_string(&mut terminal, &app);
+
+        assert!(rendered.contains("Backup Review"));
+        assert!(rendered.contains("Review backup plan."));
+        assert!(rendered.contains("Source: ./source"));
+        assert!(rendered.contains("Last backup result:"));
+        assert!(rendered.contains("Snapshot: snap_result"));
     }
 
     #[test]
