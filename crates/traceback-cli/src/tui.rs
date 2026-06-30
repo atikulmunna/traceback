@@ -15,7 +15,7 @@ use ratatui::{
     Terminal,
     backend::{Backend, CrosstermBackend},
     layout::{Alignment, Constraint, Direction, Layout},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
@@ -25,6 +25,9 @@ use traceback_repo::{
 };
 
 use crate::{BackupRequest, run_backup};
+
+const TEAL: Color = Color::Rgb(45, 212, 191);
+const SOFT_TEAL: Color = Color::Rgb(94, 234, 212);
 
 #[derive(Debug)]
 pub struct TuiApp {
@@ -1154,11 +1157,14 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
         | TuiView::SnapshotDiff => " guided terminal",
     };
     let title = Paragraph::new(Line::from(vec![
-        Span::styled("TraceBack", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "TraceBack",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        ),
         Span::raw(title_text),
     ]))
     .alignment(Alignment::Center)
-    .block(Block::default().borders(Borders::ALL));
+    .block(accent_block(""));
     frame.render_widget(title, chunks[0]);
 
     let mut overview_lines = vec![
@@ -1178,18 +1184,19 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
 
     let body = Paragraph::new(overview_lines)
         .wrap(Wrap { trim: true })
-        .block(Block::default().title("Overview").borders(Borders::ALL));
+        .block(accent_block("Overview"));
     frame.render_widget(body, chunks[1]);
 
     if app.view == TuiView::PathInput {
         let input = Paragraph::new(path_input_lines(app))
             .wrap(Wrap { trim: false })
-            .block(Block::default().title("Path Input").borders(Borders::ALL));
+            .block(accent_block("Path Input"));
         frame.render_widget(input, chunks[2]);
 
         let footer = Paragraph::new(app.help_text())
             .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL));
+            .style(Style::default().fg(SOFT_TEAL))
+            .block(accent_block(""));
         frame.render_widget(footer, chunks[3]);
         return;
     }
@@ -1197,16 +1204,13 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
     if app.view == TuiView::BackupReview {
         let review = Paragraph::new(backup_review_lines(app))
             .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title("Backup Review")
-                    .borders(Borders::ALL),
-            );
+            .block(accent_block("Backup Review"));
         frame.render_widget(review, chunks[2]);
 
         let footer = Paragraph::new(app.help_text())
             .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL));
+            .style(Style::default().fg(SOFT_TEAL))
+            .block(accent_block(""));
         frame.render_widget(footer, chunks[3]);
         return;
     }
@@ -1214,16 +1218,13 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
     if app.view == TuiView::HealthCheck {
         let health = Paragraph::new(health_check_lines(app))
             .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title("Repository Health")
-                    .borders(Borders::ALL),
-            );
+            .block(accent_block("Repository Health"));
         frame.render_widget(health, chunks[2]);
 
         let footer = Paragraph::new(app.help_text())
             .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL));
+            .style(Style::default().fg(SOFT_TEAL))
+            .block(accent_block(""));
         frame.render_widget(footer, chunks[3]);
         return;
     }
@@ -1231,16 +1232,13 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
     if app.view == TuiView::SnapshotDiff {
         let diff = Paragraph::new(snapshot_diff_lines(app))
             .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title("Snapshot Diff")
-                    .borders(Borders::ALL),
-            );
+            .block(accent_block("Snapshot Diff"));
         frame.render_widget(diff, chunks[2]);
 
         let footer = Paragraph::new(app.help_text())
             .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL));
+            .style(Style::default().fg(SOFT_TEAL))
+            .block(accent_block(""));
         frame.render_widget(footer, chunks[3]);
         return;
     }
@@ -1248,12 +1246,13 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
     if app.view == TuiView::MainMenu {
         let menu = Paragraph::new(menu_lines(app))
             .wrap(Wrap { trim: false })
-            .block(Block::default().title("Main Menu").borders(Borders::ALL));
+            .block(accent_block("Main Menu"));
         frame.render_widget(menu, chunks[2]);
 
         let footer = Paragraph::new(app.help_text())
             .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL));
+            .style(Style::default().fg(SOFT_TEAL))
+            .block(accent_block(""));
         frame.render_widget(footer, chunks[3]);
         return;
     }
@@ -1272,7 +1271,8 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
         .block(
             Block::default()
                 .title(focused_title("Snapshots", app.focus == TuiFocus::Snapshots))
-                .borders(Borders::ALL),
+                .borders(Borders::ALL)
+                .border_style(panel_border_style(app.focus == TuiFocus::Snapshots)),
         );
     frame.render_widget(snapshots, browser[0]);
 
@@ -1281,7 +1281,8 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
         .block(
             Block::default()
                 .title(file_browser_title(app))
-                .borders(Borders::ALL),
+                .borders(Borders::ALL)
+                .border_style(panel_border_style(app.focus == TuiFocus::Files)),
         );
     frame.render_widget(files, browser[1]);
 
@@ -1290,30 +1291,60 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
         .block(
             Block::default()
                 .title("Snapshot Details")
-                .borders(Borders::ALL),
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
         );
     frame.render_widget(details, browser[2]);
 
     let footer = Paragraph::new(app.help_text())
         .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::ALL));
+        .style(Style::default().fg(SOFT_TEAL))
+        .block(accent_block(""));
     frame.render_widget(footer, chunks[3]);
 }
 
+fn accent_block(title: &'static str) -> Block<'static> {
+    Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(TEAL))
+        .title_style(Style::default().fg(SOFT_TEAL).add_modifier(Modifier::BOLD))
+}
+
+fn panel_border_style(focused: bool) -> Style {
+    if focused {
+        Style::default().fg(TEAL)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
+}
+
 fn menu_lines(app: &TuiApp) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from("Choose what you want to do."), Line::from("")];
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Choose what you want to do.",
+            Style::default().fg(SOFT_TEAL),
+        )),
+        Line::from(""),
+    ];
 
     lines.extend(MENU_ITEMS.iter().enumerate().map(|(index, item)| {
-        let marker = if index == app.selected_menu_item {
-            ">"
-        } else {
-            " "
-        };
         let availability = if item.enabled { "" } else { " (coming soon)" };
-        Line::from(format!(
-            "{marker} {:<24} {}{}",
-            item.label, item.description, availability
-        ))
+        if index == app.selected_menu_item {
+            Line::from(vec![
+                Span::styled("> ", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{:<24}", item.label),
+                    Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" {}{}", item.description, availability)),
+            ])
+        } else {
+            Line::from(format!(
+                "  {:<24} {}{}",
+                item.label, item.description, availability
+            ))
+        }
     }));
 
     lines.push(Line::from(""));
@@ -1327,9 +1358,10 @@ fn menu_lines(app: &TuiApp) -> Vec<Line<'static>> {
         lines.push(Line::from(format!("Status: {status}")));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(
-        "Tip: start with Browse snapshots for the current repository.",
-    ));
+    lines.push(Line::from(vec![
+        Span::styled("Tip: ", Style::default().fg(SOFT_TEAL)),
+        Span::raw("start with Browse snapshots for the current repository."),
+    ]));
     lines
 }
 
@@ -1354,14 +1386,23 @@ fn path_input_lines(app: &TuiApp) -> Vec<Line<'static>> {
     };
 
     let mut lines = vec![
-        Line::from(title),
+        Line::from(Span::styled(
+            title,
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        )),
         Line::from(description),
         Line::from(""),
-        Line::from(format!("> {}", input.value)),
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)),
+            Span::raw(input.value.clone()),
+        ]),
     ];
     if let Some(error) = &input.error {
         lines.push(Line::from(""));
-        lines.push(Line::from(format!("Error: {error}")));
+        lines.push(Line::from(vec![
+            Span::styled("Error: ", Style::default().fg(Color::Red)),
+            Span::raw(error.clone()),
+        ]));
     }
     lines
 }
@@ -1373,7 +1414,10 @@ fn backup_review_lines(app: &TuiApp) -> Vec<Line<'static>> {
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "<not selected>".to_owned());
     let mut lines = vec![
-        Line::from("Review backup plan."),
+        Line::from(Span::styled(
+            "Review backup plan.",
+            Style::default().fg(SOFT_TEAL),
+        )),
         Line::from(""),
         Line::from(format!("Repository: {}", app.repository.display())),
         Line::from(format!("Source: {source}")),
@@ -1385,7 +1429,10 @@ fn backup_review_lines(app: &TuiApp) -> Vec<Line<'static>> {
     if let Some(result) = &app.backup_result {
         lines.extend([
             Line::from(""),
-            Line::from("Last backup result:"),
+            Line::from(Span::styled(
+                "Last backup result:",
+                Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+            )),
             Line::from(format!("Snapshot: {}", result.snapshot_id)),
             Line::from(format!("Files scanned: {}", result.files_scanned)),
             Line::from(format!("Logical: {} B", result.logical_bytes)),
@@ -1395,7 +1442,7 @@ fn backup_review_lines(app: &TuiApp) -> Vec<Line<'static>> {
     }
     if let Some(status) = &app.status_message {
         lines.push(Line::from(""));
-        lines.push(Line::from(format!("Status: {status}")));
+        lines.push(status_line(status));
     }
     lines
 }
@@ -1410,9 +1457,20 @@ fn health_check_lines(app: &TuiApp) -> Vec<Line<'static>> {
 
     let result = if report.passed { "PASS" } else { "FAIL" };
     let mut lines = vec![
-        Line::from("Repository health check"),
+        Line::from(Span::styled(
+            "Repository health check",
+            Style::default().fg(SOFT_TEAL),
+        )),
         Line::from(""),
-        Line::from(format!("Result: {result}")),
+        Line::from(vec![
+            Span::raw("Result: "),
+            Span::styled(
+                result,
+                Style::default()
+                    .fg(if report.passed { TEAL } else { Color::Red })
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
         Line::from(format!("Manifests checked: {}", report.manifests_checked)),
         Line::from(format!("Chunks verified: {}", report.chunks_verified)),
         Line::from(format!("Orphaned chunks: {}", report.orphaned_chunks)),
@@ -1425,7 +1483,10 @@ fn health_check_lines(app: &TuiApp) -> Vec<Line<'static>> {
     ];
 
     if report.issues.is_empty() {
-        lines.push(Line::from("No issues found."));
+        lines.push(Line::from(Span::styled(
+            "No issues found.",
+            Style::default().fg(TEAL),
+        )));
         lines.push(Line::from(
             "Recommendation: keep regular backups and rehearse restores.",
         ));
@@ -1466,10 +1527,13 @@ fn snapshot_diff_lines(app: &TuiApp) -> Vec<Line<'static>> {
     let old_marker = if app.diff_focus_old { ">" } else { " " };
     let new_marker = if app.diff_focus_old { " " } else { ">" };
     let mut lines = vec![
-        Line::from("Select snapshots to compare."),
+        Line::from(Span::styled(
+            "Select snapshots to compare.",
+            Style::default().fg(SOFT_TEAL),
+        )),
         Line::from(""),
-        Line::from(format!("{old_marker} Old: {old}")),
-        Line::from(format!("{new_marker} New: {new}")),
+        selector_line(old_marker, "Old", &old),
+        selector_line(new_marker, "New", &new),
         Line::from(""),
         Line::from("Press Enter to run diff."),
     ];
@@ -1477,7 +1541,10 @@ fn snapshot_diff_lines(app: &TuiApp) -> Vec<Line<'static>> {
     if let Some(result) = &app.diff_result {
         lines.extend([
             Line::from(""),
-            Line::from("Diff result:"),
+            Line::from(Span::styled(
+                "Diff result:",
+                Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+            )),
             Line::from(format!(
                 "{} -> {}",
                 result.old_snapshot_id, result.new_snapshot_id
@@ -1498,17 +1565,7 @@ fn snapshot_diff_lines(app: &TuiApp) -> Vec<Line<'static>> {
         let mut shown = 0usize;
         for (kind, entry) in entries.take(10) {
             shown += 1;
-            lines.push(Line::from(format!(
-                "{kind} {:>6} B  {}{}{}",
-                format!("{:+}", entry.byte_delta),
-                entry.path,
-                if entry.type_changed { " type" } else { "" },
-                if entry.content_changed {
-                    " content"
-                } else {
-                    ""
-                }
-            )));
+            lines.push(diff_entry_line(kind, entry));
         }
         let changed_count = result.added.len() + result.removed.len() + result.modified.len();
         if changed_count == 0 {
@@ -1546,6 +1603,56 @@ fn focused_title(title: &str, focused: bool) -> String {
     }
 }
 
+fn status_line(status: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("Status: ", Style::default().fg(SOFT_TEAL)),
+        Span::raw(status.to_owned()),
+    ])
+}
+
+fn selector_line(marker: &str, label: &'static str, value: &str) -> Line<'static> {
+    if marker == ">" {
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{label}: "),
+                Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(value.to_owned()),
+        ])
+    } else {
+        Line::from(format!("  {label}: {value}"))
+    }
+}
+
+fn diff_entry_line(kind: &str, entry: &DiffEntrySummary) -> Line<'static> {
+    let kind_style = match kind {
+        "A" => Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        "R" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        _ => Style::default().fg(SOFT_TEAL).add_modifier(Modifier::BOLD),
+    };
+    Line::from(vec![
+        Span::styled(kind.to_owned(), kind_style),
+        Span::raw(format!(
+            " {:>6} B  {}",
+            format!("{:+}", entry.byte_delta),
+            entry.path
+        )),
+        Span::styled(
+            if entry.type_changed { " type" } else { "" },
+            Style::default().fg(SOFT_TEAL),
+        ),
+        Span::styled(
+            if entry.content_changed {
+                " content"
+            } else {
+                ""
+            },
+            Style::default().fg(SOFT_TEAL),
+        ),
+    ])
+}
+
 fn file_browser_title(app: &TuiApp) -> String {
     let title = focused_title("Files", app.focus == TuiFocus::Files);
     if app.file_filter.is_empty() {
@@ -1581,13 +1688,19 @@ fn snapshot_detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
         )),
         Line::from(format!("Chunk refs: {}", snapshot.chunk_references)),
         Line::from(format!("Unique chunks: {}", snapshot.unique_chunks)),
-        Line::from("Warnings: none recorded"),
+        Line::from(vec![
+            Span::raw("Warnings: "),
+            Span::styled("none recorded", Style::default().fg(TEAL)),
+        ]),
         Line::from(""),
     ];
 
     if let Some(file) = app.selected_file() {
         lines.extend([
-            Line::from("Selected entry:"),
+            Line::from(Span::styled(
+                "Selected entry:",
+                Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+            )),
             Line::from(format!("Path: {}", file.path)),
             Line::from(format!("Type: {}", display_file_type(file.file_type))),
             Line::from(format!("Size: {} B", file.size)),
@@ -1635,8 +1748,11 @@ fn restore_plan_lines(app: &TuiApp) -> Vec<Line<'static>> {
 
     vec![
         Line::from(""),
-        Line::from("Restore preview:"),
-        Line::from(format!("Status: {status}")),
+        Line::from(Span::styled(
+            "Restore preview:",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        )),
+        status_line(status),
         Line::from("Safety: restore writes only after y confirmation."),
         Line::from(format!("Snapshot: {}", plan.snapshot_id)),
         Line::from(format!("Path: {scope}")),
@@ -1647,7 +1763,10 @@ fn restore_plan_lines(app: &TuiApp) -> Vec<Line<'static>> {
     .chain(app.restore_result.as_ref().into_iter().flat_map(|result| {
         [
             Line::from(""),
-            Line::from("Restore result:"),
+            Line::from(Span::styled(
+                "Restore result:",
+                Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+            )),
             Line::from(format!("Files: {}", result.files)),
             Line::from(format!("Directories: {}", result.directories)),
             Line::from(format!("Symlinks: {}", result.symlinks)),
@@ -1666,19 +1785,22 @@ fn snapshot_lines(app: &TuiApp) -> Vec<Line<'static>> {
         .iter()
         .enumerate()
         .map(|(index, snapshot)| {
-            let marker = if index == app.selected_snapshot {
-                ">"
-            } else {
-                " "
-            };
-            Line::from(format!(
-                "{marker} {:<36}  {:<20}  logical {:>8} B  stored {:>8} B  {}",
+            let text = format!(
+                "{:<36}  {:<20}  logical {:>8} B  stored {:>8} B  {}",
                 snapshot.snapshot_id,
                 display_created_at(&snapshot.created_at),
                 snapshot.logical_bytes,
                 snapshot.newly_stored_bytes,
                 snapshot.sources
-            ))
+            );
+            if index == app.selected_snapshot {
+                Line::from(vec![
+                    Span::styled("> ", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)),
+                    Span::styled(text, Style::default().fg(TEAL)),
+                ])
+            } else {
+                Line::from(format!("  {text}"))
+            }
         })
         .collect()
 }
@@ -1697,13 +1819,20 @@ fn file_lines(app: &TuiApp) -> Vec<Line<'static>> {
         .iter()
         .enumerate()
         .map(|(index, file)| {
-            let marker = if index == app.selected_file { ">" } else { " " };
-            Line::from(format!(
-                "{marker} {:<4} {:>8} B  {}",
+            let text = format!(
+                "{:<4} {:>8} B  {}",
                 display_file_type(file.file_type),
                 file.size,
                 file.path
-            ))
+            );
+            if index == app.selected_file {
+                Line::from(vec![
+                    Span::styled("> ", Style::default().fg(TEAL).add_modifier(Modifier::BOLD)),
+                    Span::styled(text, Style::default().fg(TEAL)),
+                ])
+            } else {
+                Line::from(format!("  {text}"))
+            }
         })
         .collect()
 }
@@ -1783,8 +1912,8 @@ mod tests {
     use crate::{BackupRequest, run_backup};
 
     use super::{
-        BackupRunSummary, DiffEntrySummary, DiffRunSummary, RestoreConfirmation, TuiApp, TuiFocus,
-        TuiView, app_for_repository, render,
+        BackupRunSummary, DiffEntrySummary, DiffRunSummary, RestoreConfirmation, TEAL, TuiApp,
+        TuiFocus, TuiView, app_for_repository, render,
     };
 
     #[test]
@@ -2552,6 +2681,26 @@ mod tests {
         assert!(rendered.contains("Check repository health"));
         assert!(rendered.contains("Compare snapshots"));
         assert!(rendered.contains("Exit"));
+    }
+
+    #[test]
+    fn render_main_menu_uses_teal_accent() {
+        let app = app_with_snapshots(1);
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+
+        terminal
+            .draw(|frame| render(frame, &app))
+            .expect("frame should render");
+
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .any(|cell| cell.fg == TEAL)
+        );
     }
 
     fn press_keys<const N: usize>(app: &mut TuiApp, keys: [KeyCode; N]) {
