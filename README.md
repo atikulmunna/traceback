@@ -101,7 +101,8 @@ checking repository health, comparing snapshots, or exiting.
 The snapshot browser shows three panels: snapshots, files in the selected
 snapshot, and details for the selected snapshot or file. Restore support previews
 the exact target and equivalent `traceback restore ...` command first. The TUI
-only writes after an explicit target is entered with `t` and the restore is
+uses a safe default restore target beside the repository under `traceback-restore`.
+Users can override that target with `t`; the TUI only writes after the restore is
 confirmed with `y`.
 
 The repository health screen runs the same integrity check as `traceback check`
@@ -125,11 +126,11 @@ Backspace       return from the browser to the main menu
 e               edit the backup source on the backup review screen
 /               start filtering file paths
 Enter           accept the current file filter
-t               enter a restore target path from the browser
+t               optionally enter a custom restore target path from the browser
 Esc             stop filtering, cancel restore preview, or quit
 c               clear the file filter while the file panel is focused
 r               preview a restore for the focused snapshot/file
-y               run the previewed restore after choosing a target
+y               run the previewed restore to the shown target
 n               cancel or clear a restore preview
 ? or F1         show or hide help
 q               quit

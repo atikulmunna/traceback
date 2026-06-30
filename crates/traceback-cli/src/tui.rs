@@ -505,7 +505,8 @@ impl TuiApp {
         }
 
         if self.restore_confirmation == RestoreConfirmation::Awaiting {
-            return "y run restore | n/Esc cancel | t change target | q quit".to_owned();
+            return "y run restore to shown target | n/Esc cancel | t change target | q quit"
+                .to_owned();
         }
 
         if self.restore_confirmation == RestoreConfirmation::Confirmed {
@@ -780,7 +781,11 @@ impl TuiApp {
         } else {
             None
         };
-        let target = restore_target(&snapshot.snapshot_id, selected_path.as_deref());
+        let target = restore_target(
+            &self.repository,
+            &snapshot.snapshot_id,
+            selected_path.as_deref(),
+        );
         let target = self.restore_target.clone().unwrap_or(target);
         let snapshot_expression = selected_path
             .as_ref()
@@ -806,10 +811,6 @@ impl TuiApp {
             self.status_message = Some("Preview a restore before running it.".to_owned());
             return;
         };
-        if self.restore_target.is_none() {
-            self.status_message = Some("Choose a restore target with t before running.".to_owned());
-            return;
-        }
 
         let result = if let Some(path) = &plan.selected_path {
             restore_snapshot_path(&self.repository, &plan.snapshot_id, path, &plan.target)
@@ -1845,8 +1846,12 @@ fn display_file_type(file_type: FileType) -> &'static str {
     }
 }
 
-fn restore_target(snapshot_id: &str, selected_path: Option<&str>) -> PathBuf {
-    let mut target = PathBuf::from("traceback-restore").join(snapshot_id);
+fn restore_target(repository: &Path, snapshot_id: &str, selected_path: Option<&str>) -> PathBuf {
+    let base = repository
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut target = base.join("traceback-restore").join(snapshot_id);
     if let Some(path) = selected_path {
         for segment in path
             .split('/')
@@ -2289,7 +2294,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_preview_defaults_to_snapshot_and_requires_confirmation() {
+    fn restore_preview_defaults_to_safe_snapshot_target() {
         let mut app = browser_app_with_snapshots(1);
 
         app.handle_key(KeyCode::Char('r'));
@@ -2301,7 +2306,9 @@ mod tests {
         assert_eq!(app.restore_confirmation, RestoreConfirmation::Awaiting);
         assert_eq!(plan.snapshot_id, "snap_001");
         assert_eq!(plan.selected_path, None);
-        let expected_target = PathBuf::from("traceback-restore").join("snap_001");
+        let expected_target = PathBuf::from(".")
+            .join("traceback-restore")
+            .join("snap_001");
         assert_eq!(plan.target, expected_target);
         assert_eq!(
             plan.command,
@@ -2311,14 +2318,6 @@ mod tests {
             )
         );
         assert!(!app.should_quit());
-
-        app.handle_key(KeyCode::Char('y'));
-
-        assert_eq!(app.restore_confirmation, RestoreConfirmation::Awaiting);
-        assert_eq!(
-            app.status_message.as_deref(),
-            Some("Choose a restore target with t before running.")
-        );
 
         app.handle_key(KeyCode::Char('n'));
 
@@ -2351,7 +2350,8 @@ mod tests {
             .expect("selected file restore plan should be prepared");
         assert_eq!(app.restore_confirmation, RestoreConfirmation::Awaiting);
         assert_eq!(plan.selected_path.as_deref(), Some("source/file-b.txt"));
-        let expected_target = PathBuf::from("traceback-restore")
+        let expected_target = PathBuf::from(".")
+            .join("traceback-restore")
             .join("snap_001")
             .join("source")
             .join("file-b.txt");
@@ -2367,6 +2367,46 @@ mod tests {
         assert!(app.restore_plan.is_none());
         assert_eq!(app.restore_confirmation, RestoreConfirmation::None);
         assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn guided_restore_runs_selected_file_to_default_target() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let source = temporary.path().join("source");
+        std::fs::create_dir(&source).expect("source should be created");
+        std::fs::write(source.join("hello.txt"), "hello").expect("source file should be written");
+        init_repository(&repository).expect("repository should initialize");
+        run_backup(BackupRequest {
+            paths: vec![source],
+            repo: repository.clone(),
+            policy_ignore_patterns: Vec::new(),
+            fail_on_changed_file: false,
+        })
+        .expect("backup should run");
+        let mut app = app_for_repository(repository).expect("app should load repository");
+        app.view = TuiView::Browser;
+        app.focus = TuiFocus::Files;
+
+        app.handle_key(KeyCode::Char('r'));
+        let target = app
+            .restore_plan
+            .as_ref()
+            .expect("restore plan should be prepared")
+            .target
+            .clone();
+        app.handle_key(KeyCode::Char('y'));
+
+        assert_eq!(app.restore_confirmation, RestoreConfirmation::Confirmed);
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("default target should be restored"),
+            "hello"
+        );
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Restore completed to "))
+        );
     }
 
     #[test]
@@ -2506,7 +2546,8 @@ mod tests {
         assert!(rendered.contains("Safety: restore writes only after y confirmation."));
         assert!(rendered.contains(&format!(
             "Target: {}",
-            PathBuf::from("traceback-restore")
+            PathBuf::from(".")
+                .join("traceback-restore")
                 .join("snap_001")
                 .display()
         )));
@@ -2657,7 +2698,8 @@ mod tests {
             plan.command,
             format!(
                 "traceback restore snap_001 --repo \"./repo with spaces\" --target {}",
-                PathBuf::from("traceback-restore")
+                PathBuf::from(".")
+                    .join("traceback-restore")
                     .join("snap_001")
                     .display()
             )
