@@ -23,8 +23,8 @@ use traceback_repo::{
     CheckReport, DoctorReport, ExplainReport, FileType, FindingLevel, GcReport, InitOutcome,
     RepositoryConfig, RepositoryError, SnapshotManifest, StorageBlameReport, blame_snapshot,
     check_repository, diff_snapshots, doctor_repository, explain_snapshot, gc_collect, gc_dry_run,
-    init_repository, list_manifests, recover_interrupted_writes, rehearse_restore,
-    restore_snapshot, restore_snapshot_path, validate_repository,
+    init_repository, list_manifests, prune_dry_run, prune_snapshots, recover_interrupted_writes,
+    rehearse_restore, restore_snapshot, restore_snapshot_path, validate_repository,
 };
 
 use crate::{BackupRequest, run_backup};
@@ -54,6 +54,9 @@ pub struct TuiApp {
     recovery_confirmation: MaintenanceConfirmation,
     gc_report: Option<GcRunSummary>,
     gc_confirmation: MaintenanceConfirmation,
+    prune_plan: Option<PruneRunSummary>,
+    prune_confirmation: MaintenanceConfirmation,
+    prune_keep_latest: usize,
     diff_old_snapshot: usize,
     diff_new_snapshot: usize,
     diff_focus_old: bool,
@@ -82,6 +85,7 @@ enum TuiView {
     StorageBlame,
     RecoverWrites,
     GarbageCollection,
+    SnapshotPruning,
     SnapshotDiff,
 }
 
@@ -112,6 +116,7 @@ enum MenuAction {
     StorageBlame,
     RecoverWrites,
     GarbageCollection,
+    SnapshotPruning,
     CompareSnapshots,
     Quit,
 }
@@ -124,7 +129,7 @@ struct MenuItem {
     enabled: bool,
 }
 
-const MENU_ITEMS: [MenuItem; 14] = [
+const MENU_ITEMS: [MenuItem; 15] = [
     MenuItem {
         label: "Browse snapshots",
         description: "Inspect snapshots, files, metadata, and restore previews.",
@@ -204,6 +209,12 @@ const MENU_ITEMS: [MenuItem; 14] = [
         enabled: true,
     },
     MenuItem {
+        label: "Prune snapshots",
+        description: "Plan retention, review selected snapshots, then confirm pruning.",
+        action: MenuAction::SnapshotPruning,
+        enabled: true,
+    },
+    MenuItem {
         label: "Exit",
         description: "Close the terminal UI.",
         action: MenuAction::Quit,
@@ -278,6 +289,14 @@ struct GcRunSummary {
 struct GcChunkSummary {
     hash: String,
     bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PruneRunSummary {
+    dry_run: bool,
+    keep_latest: usize,
+    retained_snapshots: Vec<String>,
+    pruned_snapshots: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -391,6 +410,17 @@ impl From<GcReport> for GcRunSummary {
                 })
                 .collect(),
             reclaimable_bytes: report.reclaimable_bytes,
+        }
+    }
+}
+
+impl From<traceback_repo::PrunePlan> for PruneRunSummary {
+    fn from(plan: traceback_repo::PrunePlan) -> Self {
+        Self {
+            dry_run: plan.dry_run,
+            keep_latest: plan.keep_latest,
+            retained_snapshots: plan.retained_snapshots,
+            pruned_snapshots: plan.pruned_snapshots,
         }
     }
 }
@@ -543,6 +573,9 @@ impl TuiApp {
             recovery_confirmation: MaintenanceConfirmation::None,
             gc_report: None,
             gc_confirmation: MaintenanceConfirmation::None,
+            prune_plan: None,
+            prune_confirmation: MaintenanceConfirmation::None,
+            prune_keep_latest: 1,
             diff_old_snapshot: 0,
             diff_new_snapshot: 1,
             diff_focus_old: true,
@@ -581,6 +614,9 @@ impl TuiApp {
             recovery_confirmation: MaintenanceConfirmation::None,
             gc_report: None,
             gc_confirmation: MaintenanceConfirmation::None,
+            prune_plan: None,
+            prune_confirmation: MaintenanceConfirmation::None,
+            prune_keep_latest: 1,
             diff_old_snapshot: 0,
             diff_new_snapshot: 1,
             diff_focus_old: true,
@@ -652,6 +688,11 @@ impl TuiApp {
 
         if self.view == TuiView::GarbageCollection {
             self.handle_garbage_collection_key(code);
+            return;
+        }
+
+        if self.view == TuiView::SnapshotPruning {
+            self.handle_snapshot_pruning_key(code);
             return;
         }
 
@@ -848,6 +889,29 @@ impl TuiApp {
         }
     }
 
+    fn handle_snapshot_pruning_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.run_prune_dry_run(),
+            KeyCode::Char('+') | KeyCode::Right => self.increment_prune_keep_latest(),
+            KeyCode::Char('-') | KeyCode::Left => self.decrement_prune_keep_latest(),
+            KeyCode::Char('y') | KeyCode::Char('Y')
+                if self.prune_confirmation == MaintenanceConfirmation::Awaiting =>
+            {
+                self.run_prune_snapshots();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc
+                if self.prune_confirmation == MaintenanceConfirmation::Awaiting =>
+            {
+                self.prune_confirmation = MaintenanceConfirmation::None;
+                self.status_message = Some("Snapshot pruning cancelled.".to_owned());
+            }
+            KeyCode::Backspace | KeyCode::Esc => self.view = TuiView::MainMenu,
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = !self.show_help,
+            _ => {}
+        }
+    }
+
     fn handle_snapshot_diff_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Enter => self.run_snapshot_diff(),
@@ -941,6 +1005,16 @@ impl TuiApp {
                     .to_owned()
             } else {
                 "Enter dry-run | y collect after review | Backspace/Esc menu | q quit".to_owned()
+            };
+        }
+
+        if self.view == TuiView::SnapshotPruning {
+            return if self.prune_confirmation == MaintenanceConfirmation::Awaiting {
+                "+/- keep count | y prune manifests | n/Esc cancel | Enter dry-run | q quit"
+                    .to_owned()
+            } else {
+                "+/- keep count | Enter dry-run | y prune after review | Backspace/Esc menu | q quit"
+                    .to_owned()
             };
         }
 
@@ -1067,6 +1141,7 @@ impl TuiApp {
             MenuAction::StorageBlame => self.open_storage_blame(),
             MenuAction::RecoverWrites => self.open_recover_writes(),
             MenuAction::GarbageCollection => self.open_garbage_collection(),
+            MenuAction::SnapshotPruning => self.open_snapshot_pruning(),
             MenuAction::CompareSnapshots => self.open_snapshot_diff(),
             MenuAction::Quit => self.should_quit = true,
         }
@@ -1570,6 +1645,79 @@ impl TuiApp {
         }
     }
 
+    fn open_snapshot_pruning(&mut self) {
+        self.view = TuiView::SnapshotPruning;
+        self.prune_plan = None;
+        self.prune_confirmation = MaintenanceConfirmation::None;
+        self.status_message =
+            Some("Choose keep count with +/- then press Enter to dry-run pruning.".to_owned());
+    }
+
+    fn increment_prune_keep_latest(&mut self) {
+        self.prune_keep_latest += 1;
+        self.prune_plan = None;
+        self.prune_confirmation = MaintenanceConfirmation::None;
+        self.status_message = Some(format!("Keep latest set to {}.", self.prune_keep_latest));
+    }
+
+    fn decrement_prune_keep_latest(&mut self) {
+        self.prune_keep_latest = self.prune_keep_latest.saturating_sub(1).max(1);
+        self.prune_plan = None;
+        self.prune_confirmation = MaintenanceConfirmation::None;
+        self.status_message = Some(format!("Keep latest set to {}.", self.prune_keep_latest));
+    }
+
+    fn run_prune_dry_run(&mut self) {
+        match prune_dry_run(&self.repository, self.prune_keep_latest) {
+            Ok(plan) => {
+                let selected = plan.pruned_snapshots.len();
+                self.prune_plan = Some(PruneRunSummary::from(plan));
+                self.prune_confirmation = if selected > 0 {
+                    MaintenanceConfirmation::Awaiting
+                } else {
+                    MaintenanceConfirmation::None
+                };
+                self.status_message = if selected > 0 {
+                    Some(format!(
+                        "Prune dry-run selected {selected} snapshot manifest(s)."
+                    ))
+                } else {
+                    Some("Prune dry-run selected no snapshots.".to_owned())
+                };
+            }
+            Err(error) => {
+                self.prune_plan = None;
+                self.prune_confirmation = MaintenanceConfirmation::None;
+                self.status_message = Some(format!("Prune dry-run failed: {error}"));
+            }
+        }
+    }
+
+    fn run_prune_snapshots(&mut self) {
+        match prune_snapshots(&self.repository, self.prune_keep_latest) {
+            Ok(plan) => {
+                let selected = plan.pruned_snapshots.len();
+                self.prune_plan = Some(PruneRunSummary::from(plan));
+                self.prune_confirmation = MaintenanceConfirmation::Completed;
+                match self.reload_repository() {
+                    Ok(()) => {
+                        self.status_message =
+                            Some(format!("Pruned {selected} snapshot manifest(s)."));
+                    }
+                    Err(error) => {
+                        self.status_message = Some(format!(
+                            "Pruned {selected} snapshot manifest(s), but reload failed: {error}"
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                self.prune_confirmation = MaintenanceConfirmation::None;
+                self.status_message = Some(format!("Snapshot pruning failed: {error}"));
+            }
+        }
+    }
+
     fn run_snapshot_diff(&mut self) {
         if self.snapshots.len() < 2 {
             self.status_message = Some("Create at least two snapshots to compare.".to_owned());
@@ -1894,6 +2042,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
         | TuiView::StorageBlame
         | TuiView::RecoverWrites
         | TuiView::GarbageCollection
+        | TuiView::SnapshotPruning
         | TuiView::SnapshotDiff => " guided terminal",
     };
     let title = Paragraph::new(Line::from(vec![
@@ -2044,6 +2193,20 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
             .wrap(Wrap { trim: false })
             .block(accent_block("Garbage Collection"));
         frame.render_widget(gc, chunks[2]);
+
+        let footer = Paragraph::new(app.help_text())
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(SOFT_TEAL))
+            .block(accent_block(""));
+        frame.render_widget(footer, chunks[3]);
+        return;
+    }
+
+    if app.view == TuiView::SnapshotPruning {
+        let prune = Paragraph::new(snapshot_pruning_lines(app))
+            .wrap(Wrap { trim: false })
+            .block(accent_block("Snapshot Pruning"));
+        frame.render_widget(prune, chunks[2]);
 
         let footer = Paragraph::new(app.help_text())
             .alignment(Alignment::Center)
@@ -2700,6 +2863,101 @@ fn garbage_collection_lines(app: &TuiApp) -> Vec<Line<'static>> {
     lines
 }
 
+fn snapshot_pruning_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Plan snapshot retention before deleting manifests.",
+            Style::default().fg(SOFT_TEAL),
+        )),
+        Line::from(""),
+        Line::from(format!("Keep latest: {}", app.prune_keep_latest)),
+        Line::from(format!("Published snapshots: {}", app.snapshots.len())),
+        Line::from("Use + / - to adjust the keep count, then Enter to dry-run."),
+    ];
+
+    let Some(plan) = &app.prune_plan else {
+        return lines;
+    };
+
+    lines.extend([
+        Line::from(""),
+        Line::from(Span::styled(
+            if plan.dry_run {
+                "Prune dry-run:"
+            } else {
+                "Prune result:"
+            },
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!("Keep latest: {}", plan.keep_latest)),
+        Line::from(format!(
+            "Snapshots retained: {}",
+            plan.retained_snapshots.len()
+        )),
+        Line::from(format!(
+            "Snapshots selected: {}",
+            plan.pruned_snapshots.len()
+        )),
+    ]);
+
+    if !plan.retained_snapshots.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("Retained snapshots:"));
+        lines.extend(
+            plan.retained_snapshots
+                .iter()
+                .take(4)
+                .map(|snapshot| Line::from(format!("- {snapshot}"))),
+        );
+        if plan.retained_snapshots.len() > 4 {
+            lines.push(Line::from(format!(
+                "... {} more retained snapshot(s)",
+                plan.retained_snapshots.len() - 4
+            )));
+        }
+    }
+
+    if plan.pruned_snapshots.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "No snapshots selected for pruning.",
+            Style::default().fg(TEAL),
+        )));
+        return lines;
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from("Selected for pruning:"));
+    lines.extend(
+        plan.pruned_snapshots
+            .iter()
+            .take(8)
+            .map(|snapshot| Line::from(format!("- {snapshot}"))),
+    );
+    if plan.pruned_snapshots.len() > 8 {
+        lines.push(Line::from(format!(
+            "... {} more selected snapshot(s)",
+            plan.pruned_snapshots.len() - 8
+        )));
+    }
+
+    if plan.dry_run {
+        lines.extend([
+            Line::from(""),
+            Line::from(Span::styled(
+                "Confirmation required:",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("Press y to delete selected snapshot manifests, or n/Esc to cancel."),
+            Line::from("Chunks are not deleted here; run garbage collection after pruning."),
+        ]);
+    }
+
+    lines
+}
+
 fn snapshot_diff_lines(app: &TuiApp) -> Vec<Line<'static>> {
     if app.snapshots.len() < 2 {
         return vec![
@@ -3160,7 +3418,7 @@ mod tests {
     use tempfile::tempdir;
     use traceback_repo::{
         FileEntry, FileType, FindingLevel, RepositoryConfig, SnapshotManifest, StoreChunkOutcome,
-        init_repository, store_chunk,
+        init_repository, list_manifests, store_chunk,
     };
 
     use crate::{BackupRequest, run_backup};
@@ -3168,8 +3426,8 @@ mod tests {
     use super::{
         BackupRunSummary, BlameEntrySummary, BlameRunSummary, DiffEntrySummary, DiffRunSummary,
         ExplainRunSummary, GcChunkSummary, GcRunSummary, GrowthContributorSummary, MENU_ITEMS,
-        MaintenanceConfirmation, MenuAction, RecoveryRunSummary, RestoreConfirmation, TEAL, TuiApp,
-        TuiFocus, TuiView, app_for_repository, render,
+        MaintenanceConfirmation, MenuAction, PruneRunSummary, RecoveryRunSummary,
+        RestoreConfirmation, TEAL, TuiApp, TuiFocus, TuiView, app_for_repository, render,
     };
 
     #[test]
@@ -4165,6 +4423,59 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_pruning_screen_dry_runs_then_prunes_manifests() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let source = temporary.path().join("source");
+        std::fs::create_dir(&source).expect("source should be created");
+        init_repository(&repository).expect("repository should initialize");
+        std::fs::write(source.join("hello.txt"), "one").expect("source file should be written");
+        run_backup(BackupRequest {
+            paths: vec![source.clone()],
+            repo: repository.clone(),
+            policy_ignore_patterns: Vec::new(),
+            fail_on_changed_file: false,
+        })
+        .expect("first backup should run");
+        std::fs::write(source.join("hello.txt"), "two").expect("source file should be changed");
+        run_backup(BackupRequest {
+            paths: vec![source],
+            repo: repository.clone(),
+            policy_ignore_patterns: Vec::new(),
+            fail_on_changed_file: false,
+        })
+        .expect("second backup should run");
+        let mut app = app_for_repository(repository.clone()).expect("app should load repository");
+
+        select_menu_action(&mut app, MenuAction::SnapshotPruning);
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.view, TuiView::SnapshotPruning);
+        assert_eq!(app.prune_confirmation, MaintenanceConfirmation::Awaiting);
+        let dry_run = app
+            .prune_plan
+            .as_ref()
+            .expect("prune dry-run should be recorded");
+        assert!(dry_run.dry_run);
+        assert_eq!(dry_run.keep_latest, 1);
+        assert_eq!(dry_run.retained_snapshots.len(), 1);
+        assert_eq!(dry_run.pruned_snapshots.len(), 1);
+        assert_eq!(list_manifests(&repository).unwrap().len(), 2);
+
+        app.handle_key(KeyCode::Char('y'));
+
+        assert_eq!(app.prune_confirmation, MaintenanceConfirmation::Completed);
+        let pruned = app
+            .prune_plan
+            .as_ref()
+            .expect("prune result should be recorded");
+        assert!(!pruned.dry_run);
+        assert_eq!(pruned.pruned_snapshots.len(), 1);
+        assert_eq!(list_manifests(&repository).unwrap().len(), 1);
+        assert_eq!(app.snapshot_count(), 1);
+    }
+
+    #[test]
     fn render_snapshot_diff_includes_selection_and_result() {
         let mut app = app_with_snapshots(2);
         app.view = TuiView::SnapshotDiff;
@@ -4317,6 +4628,34 @@ mod tests {
     }
 
     #[test]
+    fn render_snapshot_pruning_includes_plan_and_confirmation() {
+        let mut app = app_with_snapshots(2);
+        app.view = TuiView::SnapshotPruning;
+        app.prune_keep_latest = 1;
+        app.prune_confirmation = MaintenanceConfirmation::Awaiting;
+        app.prune_plan = Some(PruneRunSummary {
+            dry_run: true,
+            keep_latest: 1,
+            retained_snapshots: vec!["snap_002".to_owned()],
+            pruned_snapshots: vec!["snap_001".to_owned()],
+        });
+        let backend = TestBackend::new(150, 34);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+
+        let rendered = render_to_string(&mut terminal, &app);
+
+        assert!(rendered.contains("Snapshot Pruning"));
+        assert!(rendered.contains("Keep latest: 1"));
+        assert!(rendered.contains("Published snapshots: 2"));
+        assert!(rendered.contains("Prune dry-run:"));
+        assert!(rendered.contains("Snapshots retained: 1"));
+        assert!(rendered.contains("Snapshots selected: 1"));
+        assert!(rendered.contains("snap_001"));
+        assert!(rendered.contains("Confirmation required:"));
+        assert!(rendered.contains("y prune manifests"));
+    }
+
+    #[test]
     fn app_for_repository_validates_and_loads_repository() {
         let temporary = tempdir().expect("temporary directory should be created");
         let repository = temporary.path().join("repo");
@@ -4387,6 +4726,7 @@ mod tests {
         assert!(rendered.contains("Storage blame"));
         assert!(rendered.contains("Recover interrupted writes"));
         assert!(rendered.contains("Garbage collection"));
+        assert!(rendered.contains("Prune snapshots"));
         assert!(rendered.contains("Exit"));
     }
 
