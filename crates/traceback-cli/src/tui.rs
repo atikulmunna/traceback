@@ -21,9 +21,9 @@ use ratatui::{
 };
 use traceback_repo::{
     CheckReport, DoctorReport, ExplainReport, FileType, FindingLevel, InitOutcome,
-    RepositoryConfig, RepositoryError, SnapshotManifest, check_repository, diff_snapshots,
-    doctor_repository, explain_snapshot, init_repository, list_manifests, rehearse_restore,
-    restore_snapshot, restore_snapshot_path, validate_repository,
+    RepositoryConfig, RepositoryError, SnapshotManifest, StorageBlameReport, blame_snapshot,
+    check_repository, diff_snapshots, doctor_repository, explain_snapshot, init_repository,
+    list_manifests, rehearse_restore, restore_snapshot, restore_snapshot_path, validate_repository,
 };
 
 use crate::{BackupRequest, run_backup};
@@ -48,6 +48,7 @@ pub struct TuiApp {
     health_report: Option<HealthCheckSummary>,
     doctor_report: Option<DoctorRunSummary>,
     explain_result: Option<ExplainRunSummary>,
+    blame_result: Option<BlameRunSummary>,
     diff_old_snapshot: usize,
     diff_new_snapshot: usize,
     diff_focus_old: bool,
@@ -73,6 +74,7 @@ enum TuiView {
     HealthCheck,
     DoctorReport,
     ExplainBackup,
+    StorageBlame,
     SnapshotDiff,
 }
 
@@ -100,6 +102,7 @@ enum MenuAction {
     CheckHealth,
     DoctorReport,
     ExplainBackup,
+    StorageBlame,
     CompareSnapshots,
     Quit,
 }
@@ -112,7 +115,7 @@ struct MenuItem {
     enabled: bool,
 }
 
-const MENU_ITEMS: [MenuItem; 11] = [
+const MENU_ITEMS: [MenuItem; 12] = [
     MenuItem {
         label: "Browse snapshots",
         description: "Inspect snapshots, files, metadata, and restore previews.",
@@ -171,6 +174,12 @@ const MENU_ITEMS: [MenuItem; 11] = [
         label: "Explain backup",
         description: "Explain snapshot changes, reuse, and storage growth.",
         action: MenuAction::ExplainBackup,
+        enabled: true,
+    },
+    MenuItem {
+        label: "Storage blame",
+        description: "Show which paths own unique, shared, and reclaimable bytes.",
+        action: MenuAction::StorageBlame,
         enabled: true,
     },
     MenuItem {
@@ -275,6 +284,27 @@ struct GrowthContributorSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct BlameRunSummary {
+    snapshot_id: String,
+    accounting_method: String,
+    logical_bytes: u64,
+    unique_stored_bytes: u64,
+    shared_stored_bytes: u64,
+    reclaimable_stored_bytes: u64,
+    entries: Vec<BlameEntrySummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlameEntrySummary {
+    path: String,
+    file_type: FileType,
+    logical_bytes: u64,
+    unique_stored_bytes: u64,
+    shared_stored_bytes: u64,
+    reclaimable_stored_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DiffEntrySummary {
     path: String,
     byte_delta: i128,
@@ -360,6 +390,31 @@ impl From<ExplainReport> for ExplainRunSummary {
     }
 }
 
+impl From<StorageBlameReport> for BlameRunSummary {
+    fn from(report: StorageBlameReport) -> Self {
+        Self {
+            snapshot_id: report.snapshot_id,
+            accounting_method: report.accounting_method,
+            logical_bytes: report.logical_bytes,
+            unique_stored_bytes: report.unique_stored_bytes,
+            shared_stored_bytes: report.shared_stored_bytes,
+            reclaimable_stored_bytes: report.reclaimable_stored_bytes,
+            entries: report
+                .entries
+                .into_iter()
+                .map(|entry| BlameEntrySummary {
+                    path: entry.path,
+                    file_type: entry.file_type,
+                    logical_bytes: entry.logical_bytes,
+                    unique_stored_bytes: entry.unique_stored_bytes,
+                    shared_stored_bytes: entry.shared_stored_bytes,
+                    reclaimable_stored_bytes: entry.reclaimable_stored_bytes,
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SnapshotRow {
     snapshot_id: String,
@@ -418,6 +473,7 @@ impl TuiApp {
             health_report: None,
             doctor_report: None,
             explain_result: None,
+            blame_result: None,
             diff_old_snapshot: 0,
             diff_new_snapshot: 1,
             diff_focus_old: true,
@@ -451,6 +507,7 @@ impl TuiApp {
             health_report: None,
             doctor_report: None,
             explain_result: None,
+            blame_result: None,
             diff_old_snapshot: 0,
             diff_new_snapshot: 1,
             diff_focus_old: true,
@@ -507,6 +564,11 @@ impl TuiApp {
 
         if self.view == TuiView::ExplainBackup {
             self.handle_explain_backup_key(code);
+            return;
+        }
+
+        if self.view == TuiView::StorageBlame {
+            self.handle_storage_blame_key(code);
             return;
         }
 
@@ -647,6 +709,20 @@ impl TuiApp {
         }
     }
 
+    fn handle_storage_blame_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.run_storage_blame(),
+            KeyCode::Down | KeyCode::Char('j') => self.select_next_snapshot(),
+            KeyCode::Up | KeyCode::Char('k') => self.select_previous_snapshot(),
+            KeyCode::Home => self.select_first_snapshot(),
+            KeyCode::End => self.select_last_snapshot(),
+            KeyCode::Backspace | KeyCode::Esc => self.view = TuiView::MainMenu,
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = !self.show_help,
+            _ => {}
+        }
+    }
+
     fn handle_snapshot_diff_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Enter => self.run_snapshot_diff(),
@@ -717,6 +793,11 @@ impl TuiApp {
 
         if self.view == TuiView::ExplainBackup {
             return "Up/Down choose snapshot | Enter explain | Backspace/Esc menu | q quit"
+                .to_owned();
+        }
+
+        if self.view == TuiView::StorageBlame {
+            return "Up/Down choose snapshot | Enter blame | Backspace/Esc menu | q quit"
                 .to_owned();
         }
 
@@ -840,6 +921,7 @@ impl TuiApp {
                 self.run_doctor_report();
             }
             MenuAction::ExplainBackup => self.open_explain_backup(),
+            MenuAction::StorageBlame => self.open_storage_blame(),
             MenuAction::CompareSnapshots => self.open_snapshot_diff(),
             MenuAction::Quit => self.should_quit = true,
         }
@@ -1206,6 +1288,38 @@ impl TuiApp {
         }
     }
 
+    fn open_storage_blame(&mut self) {
+        self.view = TuiView::StorageBlame;
+        self.blame_result = None;
+        self.status_message = if self.snapshots.is_empty() {
+            Some("Create a snapshot before running storage blame.".to_owned())
+        } else {
+            Some("Choose a snapshot, then press Enter to inspect storage blame.".to_owned())
+        };
+    }
+
+    fn run_storage_blame(&mut self) {
+        let Some(snapshot_id) = self.selected_snapshot_id().map(ToOwned::to_owned) else {
+            self.status_message =
+                Some("Create a snapshot before running storage blame.".to_owned());
+            return;
+        };
+
+        match blame_snapshot(&self.repository, &snapshot_id) {
+            Ok(report) => {
+                let entries = report.entries.len();
+                self.blame_result = Some(BlameRunSummary::from(report));
+                self.status_message = Some(format!(
+                    "Storage blame completed for {snapshot_id}: {entries} path(s)."
+                ));
+            }
+            Err(error) => {
+                self.blame_result = None;
+                self.status_message = Some(format!("Storage blame failed: {error}"));
+            }
+        }
+    }
+
     fn run_snapshot_diff(&mut self) {
         if self.snapshots.len() < 2 {
             self.status_message = Some("Create at least two snapshots to compare.".to_owned());
@@ -1527,6 +1641,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
         | TuiView::HealthCheck
         | TuiView::DoctorReport
         | TuiView::ExplainBackup
+        | TuiView::StorageBlame
         | TuiView::SnapshotDiff => " guided terminal",
     };
     let title = Paragraph::new(Line::from(vec![
@@ -1635,6 +1750,20 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
             .wrap(Wrap { trim: false })
             .block(accent_block("Explain Backup"));
         frame.render_widget(explain, chunks[2]);
+
+        let footer = Paragraph::new(app.help_text())
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(SOFT_TEAL))
+            .block(accent_block(""));
+        frame.render_widget(footer, chunks[3]);
+        return;
+    }
+
+    if app.view == TuiView::StorageBlame {
+        let blame = Paragraph::new(storage_blame_lines(app))
+            .wrap(Wrap { trim: false })
+            .block(accent_block("Storage Blame"));
+        frame.render_widget(blame, chunks[2]);
 
         let footer = Paragraph::new(app.help_text())
             .alignment(Alignment::Center)
@@ -2108,6 +2237,64 @@ fn explain_backup_lines(app: &TuiApp) -> Vec<Line<'static>> {
     lines
 }
 
+fn storage_blame_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    if app.snapshots.is_empty() {
+        return vec![
+            Line::from("Storage blame needs at least one snapshot."),
+            Line::from("Create a backup, then return here."),
+        ];
+    }
+
+    let selected = app.selected_snapshot_id().unwrap_or("<none>");
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Find which paths account for stored bytes.",
+            Style::default().fg(SOFT_TEAL),
+        )),
+        Line::from(""),
+        Line::from(format!("Selected snapshot: {selected}")),
+        Line::from("Press Enter to run storage blame for this snapshot."),
+        Line::from(""),
+        Line::from("Snapshots:"),
+    ];
+    lines.extend(snapshot_lines(app).into_iter().take(6));
+
+    if let Some(result) = &app.blame_result {
+        lines.extend([
+            Line::from(""),
+            Line::from(Span::styled(
+                "Storage blame:",
+                Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!("Snapshot: {}", result.snapshot_id)),
+            Line::from(format!("Logical bytes: {} B", result.logical_bytes)),
+            Line::from(format!(
+                "Unique stored bytes: {} B",
+                result.unique_stored_bytes
+            )),
+            Line::from(format!(
+                "Shared stored bytes: {} B",
+                result.shared_stored_bytes
+            )),
+            Line::from(format!(
+                "Reclaimable stored bytes: {} B",
+                result.reclaimable_stored_bytes
+            )),
+            Line::from(format!("Accounting: {}", result.accounting_method)),
+            Line::from(""),
+            Line::from("Top paths:"),
+            Line::from("type   logical B   unique B   shared B  reclaim B  path"),
+        ]);
+        if result.entries.is_empty() {
+            lines.push(Line::from("No file entries found."));
+        } else {
+            lines.extend(result.entries.iter().take(10).map(storage_blame_entry_line));
+        }
+    }
+
+    lines
+}
+
 fn snapshot_diff_lines(app: &TuiApp) -> Vec<Line<'static>> {
     if app.snapshots.len() < 2 {
         return vec![
@@ -2253,6 +2440,18 @@ fn doctor_finding_line(finding: &DoctorFindingSummary) -> Line<'static> {
         ),
         Span::raw(format!(" {}: {}", finding.code, finding.message)),
     ])
+}
+
+fn storage_blame_entry_line(entry: &BlameEntrySummary) -> Line<'static> {
+    Line::from(format!(
+        "{:<4} {:>11} {:>10} {:>10} {:>10}  {}",
+        display_file_type(entry.file_type),
+        entry.logical_bytes,
+        entry.unique_stored_bytes,
+        entry.shared_stored_bytes,
+        entry.reclaimable_stored_bytes,
+        entry.path
+    ))
 }
 
 fn selector_line(marker: &str, label: &'static str, value: &str) -> Line<'static> {
@@ -2561,9 +2760,9 @@ mod tests {
     use crate::{BackupRequest, run_backup};
 
     use super::{
-        BackupRunSummary, DiffEntrySummary, DiffRunSummary, ExplainRunSummary,
-        GrowthContributorSummary, MENU_ITEMS, MenuAction, RestoreConfirmation, TEAL, TuiApp,
-        TuiFocus, TuiView, app_for_repository, render,
+        BackupRunSummary, BlameEntrySummary, BlameRunSummary, DiffEntrySummary, DiffRunSummary,
+        ExplainRunSummary, GrowthContributorSummary, MENU_ITEMS, MenuAction, RestoreConfirmation,
+        TEAL, TuiApp, TuiFocus, TuiView, app_for_repository, render,
     };
 
     #[test]
@@ -3425,6 +3624,46 @@ mod tests {
     }
 
     #[test]
+    fn storage_blame_screen_runs_for_selected_snapshot() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let source = temporary.path().join("source");
+        std::fs::create_dir(&source).expect("source should be created");
+        std::fs::write(source.join("hello.txt"), "hello").expect("source file should be written");
+        init_repository(&repository).expect("repository should initialize");
+        run_backup(BackupRequest {
+            paths: vec![source],
+            repo: repository.clone(),
+            policy_ignore_patterns: Vec::new(),
+            fail_on_changed_file: false,
+        })
+        .expect("backup should run");
+        let mut app = app_for_repository(repository).expect("app should load repository");
+
+        select_menu_action(&mut app, MenuAction::StorageBlame);
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.view, TuiView::StorageBlame);
+        let result = app
+            .blame_result
+            .as_ref()
+            .expect("storage blame result should be recorded");
+        assert!(
+            result
+                .entries
+                .iter()
+                .any(|entry| entry.path == "source/hello.txt")
+        );
+        assert_eq!(result.logical_bytes, 5);
+        assert!(result.unique_stored_bytes > 0);
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|status| status.starts_with("Storage blame completed for "))
+        );
+    }
+
+    #[test]
     fn render_snapshot_diff_includes_selection_and_result() {
         let mut app = app_with_snapshots(2);
         app.view = TuiView::SnapshotDiff;
@@ -3488,6 +3727,41 @@ mod tests {
         assert!(rendered.contains("Top growth contributors:"));
         assert!(rendered.contains("source/file-a.txt"));
         assert!(rendered.contains("Enter explain"));
+    }
+
+    #[test]
+    fn render_storage_blame_includes_totals_and_top_paths() {
+        let mut app = app_with_snapshots(1);
+        app.view = TuiView::StorageBlame;
+        app.blame_result = Some(BlameRunSummary {
+            snapshot_id: "snap_001".to_owned(),
+            accounting_method: "test accounting".to_owned(),
+            logical_bytes: 42,
+            unique_stored_bytes: 12,
+            shared_stored_bytes: 30,
+            reclaimable_stored_bytes: 12,
+            entries: vec![BlameEntrySummary {
+                path: "source/file-a.txt".to_owned(),
+                file_type: FileType::File,
+                logical_bytes: 42,
+                unique_stored_bytes: 12,
+                shared_stored_bytes: 30,
+                reclaimable_stored_bytes: 12,
+            }],
+        });
+        let backend = TestBackend::new(170, 38);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+
+        let rendered = render_to_string(&mut terminal, &app);
+
+        assert!(rendered.contains("Storage Blame"));
+        assert!(rendered.contains("Selected snapshot: snap_001"));
+        assert!(rendered.contains("Storage blame:"));
+        assert!(rendered.contains("Unique stored bytes: 12 B"));
+        assert!(rendered.contains("Accounting: test accounting"));
+        assert!(rendered.contains("Top paths:"));
+        assert!(rendered.contains("source/file-a.txt"));
+        assert!(rendered.contains("Enter blame"));
     }
 
     #[test]
@@ -3558,6 +3832,7 @@ mod tests {
         assert!(rendered.contains("Doctor report"));
         assert!(rendered.contains("Compare snapshots"));
         assert!(rendered.contains("Explain backup"));
+        assert!(rendered.contains("Storage blame"));
         assert!(rendered.contains("Exit"));
     }
 
