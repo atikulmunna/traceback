@@ -20,9 +20,10 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 use traceback_repo::{
-    CheckReport, FileType, InitOutcome, RepositoryConfig, RepositoryError, SnapshotManifest,
-    check_repository, diff_snapshots, init_repository, list_manifests, rehearse_restore,
-    restore_snapshot, restore_snapshot_path, validate_repository,
+    CheckReport, DoctorReport, FileType, FindingLevel, InitOutcome, RepositoryConfig,
+    RepositoryError, SnapshotManifest, check_repository, diff_snapshots, doctor_repository,
+    init_repository, list_manifests, rehearse_restore, restore_snapshot, restore_snapshot_path,
+    validate_repository,
 };
 
 use crate::{BackupRequest, run_backup};
@@ -45,6 +46,7 @@ pub struct TuiApp {
     restore_result: Option<RestoreRunSummary>,
     rehearsal_result: Option<RestoreRunSummary>,
     health_report: Option<HealthCheckSummary>,
+    doctor_report: Option<DoctorRunSummary>,
     diff_old_snapshot: usize,
     diff_new_snapshot: usize,
     diff_focus_old: bool,
@@ -68,6 +70,7 @@ enum TuiView {
     BackupReview,
     RestoreRehearsal,
     HealthCheck,
+    DoctorReport,
     SnapshotDiff,
 }
 
@@ -93,6 +96,7 @@ enum MenuAction {
     RestoreFiles,
     RehearseRestore,
     CheckHealth,
+    DoctorReport,
     CompareSnapshots,
     Quit,
 }
@@ -105,7 +109,7 @@ struct MenuItem {
     enabled: bool,
 }
 
-const MENU_ITEMS: [MenuItem; 9] = [
+const MENU_ITEMS: [MenuItem; 10] = [
     MenuItem {
         label: "Browse snapshots",
         description: "Inspect snapshots, files, metadata, and restore previews.",
@@ -146,6 +150,12 @@ const MENU_ITEMS: [MenuItem; 9] = [
         label: "Check repository health",
         description: "Run integrity checks and review findings.",
         action: MenuAction::CheckHealth,
+        enabled: true,
+    },
+    MenuItem {
+        label: "Doctor report",
+        description: "Review reliability score, evidence gaps, and recommendations.",
+        action: MenuAction::DoctorReport,
         enabled: true,
     },
     MenuItem {
@@ -205,6 +215,26 @@ struct HealthCheckSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct DoctorRunSummary {
+    latest_snapshot_id: Option<String>,
+    latest_snapshot_age_seconds: Option<i64>,
+    integrity_passed: bool,
+    latest_check_passed: Option<bool>,
+    latest_rehearsal_passed: Option<bool>,
+    health_score: u8,
+    scoring_version: String,
+    findings: Vec<DoctorFindingSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DoctorFindingSummary {
+    level: FindingLevel,
+    code: String,
+    message: String,
+    recommendation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DiffRunSummary {
     old_snapshot_id: String,
     new_snapshot_id: String,
@@ -235,6 +265,30 @@ impl From<CheckReport> for HealthCheckSummary {
                 .issues
                 .into_iter()
                 .map(|issue| issue.to_string())
+                .collect(),
+        }
+    }
+}
+
+impl From<DoctorReport> for DoctorRunSummary {
+    fn from(report: DoctorReport) -> Self {
+        Self {
+            latest_snapshot_id: report.latest_snapshot_id,
+            latest_snapshot_age_seconds: report.latest_snapshot_age_seconds,
+            integrity_passed: report.integrity_passed,
+            latest_check_passed: report.latest_check_passed,
+            latest_rehearsal_passed: report.latest_rehearsal_passed,
+            health_score: report.health_score,
+            scoring_version: report.scoring_version,
+            findings: report
+                .findings
+                .into_iter()
+                .map(|finding| DoctorFindingSummary {
+                    level: finding.level,
+                    code: finding.code,
+                    message: finding.message,
+                    recommendation: finding.recommendation,
+                })
                 .collect(),
         }
     }
@@ -307,6 +361,7 @@ impl TuiApp {
             restore_result: None,
             rehearsal_result: None,
             health_report: None,
+            doctor_report: None,
             diff_old_snapshot: 0,
             diff_new_snapshot: 1,
             diff_focus_old: true,
@@ -338,6 +393,7 @@ impl TuiApp {
             restore_result: None,
             rehearsal_result: None,
             health_report: None,
+            doctor_report: None,
             diff_old_snapshot: 0,
             diff_new_snapshot: 1,
             diff_focus_old: true,
@@ -384,6 +440,11 @@ impl TuiApp {
 
         if self.view == TuiView::HealthCheck {
             self.handle_health_check_key(code);
+            return;
+        }
+
+        if self.view == TuiView::DoctorReport {
+            self.handle_doctor_report_key(code);
             return;
         }
 
@@ -500,6 +561,16 @@ impl TuiApp {
         }
     }
 
+    fn handle_doctor_report_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.run_doctor_report(),
+            KeyCode::Backspace | KeyCode::Esc => self.view = TuiView::MainMenu,
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = !self.show_help,
+            _ => {}
+        }
+    }
+
     fn handle_snapshot_diff_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Enter => self.run_snapshot_diff(),
@@ -562,6 +633,10 @@ impl TuiApp {
 
         if self.view == TuiView::HealthCheck {
             return "Enter rerun check | Backspace/Esc menu | q quit".to_owned();
+        }
+
+        if self.view == TuiView::DoctorReport {
+            return "Enter rerun doctor | Backspace/Esc menu | q quit".to_owned();
         }
 
         if self.view == TuiView::SnapshotDiff {
@@ -678,6 +753,10 @@ impl TuiApp {
             MenuAction::CheckHealth => {
                 self.view = TuiView::HealthCheck;
                 self.run_health_check();
+            }
+            MenuAction::DoctorReport => {
+                self.view = TuiView::DoctorReport;
+                self.run_doctor_report();
             }
             MenuAction::CompareSnapshots => self.open_snapshot_diff(),
             MenuAction::Quit => self.should_quit = true,
@@ -999,6 +1078,20 @@ impl TuiApp {
         });
     }
 
+    fn run_doctor_report(&mut self) {
+        match doctor_repository(&self.repository) {
+            Ok(report) => {
+                let score = report.health_score;
+                self.doctor_report = Some(DoctorRunSummary::from(report));
+                self.status_message = Some(format!("Doctor report completed: score {score}/100."));
+            }
+            Err(error) => {
+                self.doctor_report = None;
+                self.status_message = Some(format!("Doctor report failed: {error}"));
+            }
+        }
+    }
+
     fn run_snapshot_diff(&mut self) {
         if self.snapshots.len() < 2 {
             self.status_message = Some("Create at least two snapshots to compare.".to_owned());
@@ -1318,6 +1411,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
         | TuiView::BackupReview
         | TuiView::RestoreRehearsal
         | TuiView::HealthCheck
+        | TuiView::DoctorReport
         | TuiView::SnapshotDiff => " guided terminal",
     };
     let title = Paragraph::new(Line::from(vec![
@@ -1398,6 +1492,20 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
             .wrap(Wrap { trim: false })
             .block(accent_block("Repository Health"));
         frame.render_widget(health, chunks[2]);
+
+        let footer = Paragraph::new(app.help_text())
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(SOFT_TEAL))
+            .block(accent_block(""));
+        frame.render_widget(footer, chunks[3]);
+        return;
+    }
+
+    if app.view == TuiView::DoctorReport {
+        let doctor = Paragraph::new(doctor_report_lines(app))
+            .wrap(Wrap { trim: false })
+            .block(accent_block("Doctor Report"));
+        frame.render_widget(doctor, chunks[2]);
 
         let footer = Paragraph::new(app.help_text())
             .alignment(Alignment::Center)
@@ -1732,6 +1840,73 @@ fn health_check_lines(app: &TuiApp) -> Vec<Line<'static>> {
     lines
 }
 
+fn doctor_report_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    let Some(report) = &app.doctor_report else {
+        return vec![
+            Line::from("Repository doctor has not run yet."),
+            Line::from("Press Enter to run it now."),
+        ];
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Reliability summary",
+            Style::default().fg(SOFT_TEAL),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("Health score: "),
+            Span::styled(
+                format!("{}/100", report.health_score),
+                Style::default()
+                    .fg(score_color(report.health_score))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(format!("Scoring: {}", report.scoring_version)),
+        Line::from(format!(
+            "Latest snapshot: {}",
+            report.latest_snapshot_id.as_deref().unwrap_or("<none>")
+        )),
+        Line::from(format!(
+            "Latest snapshot age: {}",
+            format_age(report.latest_snapshot_age_seconds)
+        )),
+        Line::from(format!(
+            "Current integrity: {}",
+            pass_label(Some(report.integrity_passed))
+        )),
+        Line::from(format!(
+            "Recorded check evidence: {}",
+            pass_label(report.latest_check_passed)
+        )),
+        Line::from(format!(
+            "Recorded rehearsal evidence: {}",
+            pass_label(report.latest_rehearsal_passed)
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Findings:",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        )),
+    ];
+
+    for finding in report.findings.iter().take(8) {
+        lines.push(doctor_finding_line(finding));
+        if let Some(recommendation) = &finding.recommendation {
+            lines.push(Line::from(format!("  Recommendation: {recommendation}")));
+        }
+    }
+    if report.findings.len() > 8 {
+        lines.push(Line::from(format!(
+            "... {} more finding(s)",
+            report.findings.len() - 8
+        )));
+    }
+
+    lines
+}
+
 fn snapshot_diff_lines(app: &TuiApp) -> Vec<Line<'static>> {
     if app.snapshots.len() < 2 {
         return vec![
@@ -1825,6 +2000,57 @@ fn status_line(status: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled("Status: ", Style::default().fg(SOFT_TEAL)),
         Span::raw(status.to_owned()),
+    ])
+}
+
+fn pass_label(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "PASS",
+        Some(false) => "FAIL",
+        None => "not recorded",
+    }
+}
+
+fn score_color(score: u8) -> Color {
+    if score >= 80 {
+        TEAL
+    } else if score >= 50 {
+        Color::Yellow
+    } else {
+        Color::Red
+    }
+}
+
+fn format_age(seconds: Option<i64>) -> String {
+    let Some(seconds) = seconds else {
+        return "not available".to_owned();
+    };
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes}m");
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        return format!("{hours}h");
+    }
+    format!("{}d", hours / 24)
+}
+
+fn doctor_finding_line(finding: &DoctorFindingSummary) -> Line<'static> {
+    let (label, color) = match finding.level {
+        FindingLevel::Good => ("GOOD", TEAL),
+        FindingLevel::Warning => ("WARN", Color::Yellow),
+        FindingLevel::Critical => ("CRITICAL", Color::Red),
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("- {label:<8}"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" {}: {}", finding.code, finding.message)),
     ])
 }
 
@@ -2128,14 +2354,14 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use tempfile::tempdir;
     use traceback_repo::{
-        FileEntry, FileType, RepositoryConfig, SnapshotManifest, init_repository,
+        FileEntry, FileType, FindingLevel, RepositoryConfig, SnapshotManifest, init_repository,
     };
 
     use crate::{BackupRequest, run_backup};
 
     use super::{
-        BackupRunSummary, DiffEntrySummary, DiffRunSummary, RestoreConfirmation, TEAL, TuiApp,
-        TuiFocus, TuiView, app_for_repository, render,
+        BackupRunSummary, DiffEntrySummary, DiffRunSummary, MENU_ITEMS, MenuAction,
+        RestoreConfirmation, TEAL, TuiApp, TuiFocus, TuiView, app_for_repository, render,
     };
 
     #[test]
@@ -2186,19 +2412,7 @@ mod tests {
     fn compare_menu_opens_diff_screen_and_requires_two_snapshots() {
         let mut app = app_with_snapshots(1);
 
-        press_keys(
-            &mut app,
-            [
-                KeyCode::Down,
-                KeyCode::Down,
-                KeyCode::Down,
-                KeyCode::Down,
-                KeyCode::Down,
-                KeyCode::Down,
-                KeyCode::Down,
-                KeyCode::Enter,
-            ],
-        );
+        select_menu_action(&mut app, MenuAction::CompareSnapshots);
 
         assert_eq!(app.view, TuiView::SnapshotDiff);
         assert!(!app.should_quit());
@@ -2238,6 +2452,34 @@ mod tests {
         assert_eq!(
             app.status_message.as_deref(),
             Some("Repository health check passed.")
+        );
+
+        app.handle_key(KeyCode::Backspace);
+        assert_eq!(app.view, TuiView::MainMenu);
+    }
+
+    #[test]
+    fn doctor_report_menu_runs_reliability_report() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        let mut app = app_for_repository(repository).expect("app should load repository");
+
+        select_menu_action(&mut app, MenuAction::DoctorReport);
+
+        assert_eq!(app.view, TuiView::DoctorReport);
+        let report = app
+            .doctor_report
+            .as_ref()
+            .expect("doctor report should be recorded");
+        assert!(report.health_score < 100);
+        assert!(report.findings.iter().any(|finding| {
+            finding.level == FindingLevel::Warning || finding.level == FindingLevel::Critical
+        }));
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|status| status.starts_with("Doctor report completed: score "))
         );
 
         app.handle_key(KeyCode::Backspace);
@@ -2872,6 +3114,28 @@ mod tests {
     }
 
     #[test]
+    fn render_doctor_report_includes_score_and_findings() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        let mut app = app_for_repository(repository).expect("app should load repository");
+        app.view = TuiView::DoctorReport;
+        app.run_doctor_report();
+        let backend = TestBackend::new(150, 34);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+
+        let rendered = render_to_string(&mut terminal, &app);
+
+        assert!(rendered.contains("Doctor Report"));
+        assert!(rendered.contains("Health score:"));
+        assert!(rendered.contains("Latest snapshot: <none>"));
+        assert!(rendered.contains("Recorded rehearsal evidence:"));
+        assert!(rendered.contains("Findings:"));
+        assert!(rendered.contains("Recommendation:"));
+        assert!(rendered.contains("Enter rerun doctor"));
+    }
+
+    #[test]
     fn snapshot_diff_screen_runs_diff_between_selected_snapshots() {
         let temporary = tempdir().expect("temporary directory should be created");
         let repository = temporary.path().join("repo");
@@ -2897,20 +3161,8 @@ mod tests {
         .expect("second backup should run");
         let mut app = app_for_repository(repository).expect("app should load repository");
 
-        press_keys(
-            &mut app,
-            [
-                KeyCode::Down,
-                KeyCode::Down,
-                KeyCode::Down,
-                KeyCode::Down,
-                KeyCode::Down,
-                KeyCode::Down,
-                KeyCode::Down,
-                KeyCode::Enter,
-                KeyCode::Enter,
-            ],
-        );
+        select_menu_action(&mut app, MenuAction::CompareSnapshots);
+        app.handle_key(KeyCode::Enter);
 
         assert_eq!(app.view, TuiView::SnapshotDiff);
         let result = app
@@ -3021,6 +3273,7 @@ mod tests {
         assert!(rendered.contains("Restore files"));
         assert!(rendered.contains("Rehearse restore"));
         assert!(rendered.contains("Check repository health"));
+        assert!(rendered.contains("Doctor report"));
         assert!(rendered.contains("Compare snapshots"));
         assert!(rendered.contains("Exit"));
     }
@@ -3049,6 +3302,14 @@ mod tests {
         for key in keys {
             app.handle_key(key);
         }
+    }
+
+    fn select_menu_action(app: &mut TuiApp, action: MenuAction) {
+        app.selected_menu_item = MENU_ITEMS
+            .iter()
+            .position(|item| item.action == action)
+            .expect("menu action should exist");
+        app.handle_key(KeyCode::Enter);
     }
 
     fn replace_input(app: &mut TuiApp, value: &str) {

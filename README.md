@@ -99,7 +99,8 @@ traceback tui --repo ./my-backups --source ./documents
 
 The main menu lets users choose guided actions such as changing or initializing
 the repository, running a backup from a selected source, browsing snapshots,
-restoring files, checking repository health, comparing snapshots, or exiting.
+restoring files, rehearsing restores, checking repository health, reviewing the
+doctor report, comparing snapshots, or exiting.
 
 The snapshot browser shows three panels: snapshots, files in the selected
 snapshot, and details for the selected snapshot or file. Restore support previews
@@ -111,6 +112,10 @@ confirmed with `y`.
 The repository health screen runs the same integrity check as `traceback check`
 and shows pass/fail status, verified manifest and chunk counts, staging or
 temporary leftovers, orphaned chunks, and issue guidance.
+
+The doctor report screen runs the same reliability report as `traceback doctor`
+and shows the health score, latest backup evidence, current integrity status,
+recorded check/rehearsal evidence, findings, and recommendations.
 
 The restore rehearsal screen verifies that a selected snapshot can be restored
 into a temporary directory without writing to a user-selected destination.
@@ -128,6 +133,7 @@ Home/End        jump to the first or last item in the focused panel
 Enter           select a main-menu item
 Enter           run restore rehearsal on the rehearsal screen
 Enter           rerun the repository health check on the health screen
+Enter           rerun the doctor report on the doctor screen
 Enter           run the selected snapshot diff on the diff screen
 Backspace       return from the browser to the main menu
 e               edit the backup source on the backup review screen
