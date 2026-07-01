@@ -21,8 +21,8 @@ use ratatui::{
 };
 use traceback_repo::{
     CheckReport, FileType, InitOutcome, RepositoryConfig, RepositoryError, SnapshotManifest,
-    check_repository, diff_snapshots, init_repository, list_manifests, restore_snapshot,
-    restore_snapshot_path, validate_repository,
+    check_repository, diff_snapshots, init_repository, list_manifests, rehearse_restore,
+    restore_snapshot, restore_snapshot_path, validate_repository,
 };
 
 use crate::{BackupRequest, run_backup};
@@ -43,6 +43,7 @@ pub struct TuiApp {
     backup_result: Option<BackupRunSummary>,
     restore_target: Option<PathBuf>,
     restore_result: Option<RestoreRunSummary>,
+    rehearsal_result: Option<RestoreRunSummary>,
     health_report: Option<HealthCheckSummary>,
     diff_old_snapshot: usize,
     diff_new_snapshot: usize,
@@ -65,6 +66,7 @@ enum TuiView {
     Browser,
     PathInput,
     BackupReview,
+    RestoreRehearsal,
     HealthCheck,
     SnapshotDiff,
 }
@@ -89,6 +91,7 @@ enum MenuAction {
     InitializeRepository,
     CreateBackup,
     RestoreFiles,
+    RehearseRestore,
     CheckHealth,
     CompareSnapshots,
     Quit,
@@ -102,7 +105,7 @@ struct MenuItem {
     enabled: bool,
 }
 
-const MENU_ITEMS: [MenuItem; 8] = [
+const MENU_ITEMS: [MenuItem; 9] = [
     MenuItem {
         label: "Browse snapshots",
         description: "Inspect snapshots, files, metadata, and restore previews.",
@@ -131,6 +134,12 @@ const MENU_ITEMS: [MenuItem; 8] = [
         label: "Restore files",
         description: "Open the browser and preview safe restore commands.",
         action: MenuAction::RestoreFiles,
+        enabled: true,
+    },
+    MenuItem {
+        label: "Rehearse restore",
+        description: "Verify a snapshot restore without writing to a chosen target.",
+        action: MenuAction::RehearseRestore,
         enabled: true,
     },
     MenuItem {
@@ -296,6 +305,7 @@ impl TuiApp {
             backup_result: None,
             restore_target: None,
             restore_result: None,
+            rehearsal_result: None,
             health_report: None,
             diff_old_snapshot: 0,
             diff_new_snapshot: 1,
@@ -326,6 +336,7 @@ impl TuiApp {
             backup_result: None,
             restore_target: None,
             restore_result: None,
+            rehearsal_result: None,
             health_report: None,
             diff_old_snapshot: 0,
             diff_new_snapshot: 1,
@@ -363,6 +374,11 @@ impl TuiApp {
 
         if self.view == TuiView::BackupReview {
             self.handle_backup_review_key(code);
+            return;
+        }
+
+        if self.view == TuiView::RestoreRehearsal {
+            self.handle_restore_rehearsal_key(code);
             return;
         }
 
@@ -460,6 +476,20 @@ impl TuiApp {
         }
     }
 
+    fn handle_restore_rehearsal_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.run_restore_rehearsal(),
+            KeyCode::Down | KeyCode::Char('j') => self.select_next_snapshot(),
+            KeyCode::Up | KeyCode::Char('k') => self.select_previous_snapshot(),
+            KeyCode::Home => self.select_first_snapshot(),
+            KeyCode::End => self.select_last_snapshot(),
+            KeyCode::Backspace | KeyCode::Esc => self.view = TuiView::MainMenu,
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = !self.show_help,
+            _ => {}
+        }
+    }
+
     fn handle_health_check_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Enter => self.run_health_check(),
@@ -523,6 +553,11 @@ impl TuiApp {
 
         if self.view == TuiView::BackupReview {
             return "Enter run backup | e edit source | Backspace/Esc menu | q quit".to_owned();
+        }
+
+        if self.view == TuiView::RestoreRehearsal {
+            return "Up/Down choose snapshot | Enter rehearse | Backspace/Esc menu | q quit"
+                .to_owned();
         }
 
         if self.view == TuiView::HealthCheck {
@@ -638,6 +673,7 @@ impl TuiApp {
                     self.start_path_input(PathInputKind::BackupSource);
                 }
             }
+            MenuAction::RehearseRestore => self.open_restore_rehearsal(),
             MenuAction::InitializeRepository => self.initialize_repository(),
             MenuAction::CheckHealth => {
                 self.view = TuiView::HealthCheck;
@@ -828,6 +864,39 @@ impl TuiApp {
             },
             Err(error) => {
                 self.status_message = Some(format!("Repository init failed: {error}"));
+            }
+        }
+    }
+
+    fn open_restore_rehearsal(&mut self) {
+        self.view = TuiView::RestoreRehearsal;
+        self.rehearsal_result = None;
+        self.status_message = if self.snapshots.is_empty() {
+            Some("Create a snapshot before rehearsing restore.".to_owned())
+        } else {
+            Some("Choose a snapshot, then press Enter to rehearse restore.".to_owned())
+        };
+    }
+
+    fn run_restore_rehearsal(&mut self) {
+        let Some(snapshot_id) = self.selected_snapshot_id().map(ToOwned::to_owned) else {
+            self.status_message = Some("Create a snapshot before rehearsing restore.".to_owned());
+            return;
+        };
+
+        match rehearse_restore(&self.repository, &snapshot_id) {
+            Ok(summary) => {
+                self.rehearsal_result = Some(RestoreRunSummary {
+                    files: summary.files,
+                    directories: summary.directories,
+                    symlinks: summary.symlinks,
+                    bytes: summary.bytes,
+                });
+                self.status_message = Some(format!("Restore rehearsal passed for {snapshot_id}."));
+            }
+            Err(error) => {
+                self.rehearsal_result = None;
+                self.status_message = Some(format!("Restore rehearsal failed: {error}"));
             }
         }
     }
@@ -1247,6 +1316,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
         TuiView::MainMenu
         | TuiView::PathInput
         | TuiView::BackupReview
+        | TuiView::RestoreRehearsal
         | TuiView::HealthCheck
         | TuiView::SnapshotDiff => " guided terminal",
     };
@@ -1300,6 +1370,20 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
             .wrap(Wrap { trim: false })
             .block(accent_block("Backup Review"));
         frame.render_widget(review, chunks[2]);
+
+        let footer = Paragraph::new(app.help_text())
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(SOFT_TEAL))
+            .block(accent_block(""));
+        frame.render_widget(footer, chunks[3]);
+        return;
+    }
+
+    if app.view == TuiView::RestoreRehearsal {
+        let rehearsal = Paragraph::new(restore_rehearsal_lines(app))
+            .wrap(Wrap { trim: false })
+            .block(accent_block("Restore Rehearsal"));
+        frame.render_widget(rehearsal, chunks[2]);
 
         let footer = Paragraph::new(app.help_text())
             .alignment(Alignment::Center)
@@ -1538,6 +1622,46 @@ fn backup_review_lines(app: &TuiApp) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
         lines.push(status_line(status));
     }
+    lines
+}
+
+fn restore_rehearsal_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    if app.snapshots.is_empty() {
+        return vec![
+            Line::from("Restore rehearsal needs at least one snapshot."),
+            Line::from("Create a backup, then return here."),
+        ];
+    }
+
+    let selected = app.selected_snapshot_id().unwrap_or("<none>");
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Verify restore without writing to a user target.",
+            Style::default().fg(SOFT_TEAL),
+        )),
+        Line::from(""),
+        Line::from(format!("Selected snapshot: {selected}")),
+        Line::from("Press Enter to run rehearsal in a temporary directory."),
+        Line::from(""),
+        Line::from("Snapshots:"),
+    ];
+    lines.extend(snapshot_lines(app).into_iter().take(8));
+
+    if let Some(result) = &app.rehearsal_result {
+        lines.extend([
+            Line::from(""),
+            Line::from(Span::styled(
+                "Last rehearsal result:",
+                Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+            )),
+            Line::from("Result: PASS"),
+            Line::from(format!("Files verified: {}", result.files)),
+            Line::from(format!("Directories verified: {}", result.directories)),
+            Line::from(format!("Symlinks verified: {}", result.symlinks)),
+            Line::from(format!("Bytes verified: {} B", result.bytes)),
+        ]);
+    }
+
     lines
 }
 
@@ -2071,6 +2195,7 @@ mod tests {
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Down,
+                KeyCode::Down,
                 KeyCode::Enter,
             ],
         );
@@ -2098,6 +2223,7 @@ mod tests {
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Down,
+                KeyCode::Down,
                 KeyCode::Enter,
             ],
         );
@@ -2116,6 +2242,50 @@ mod tests {
 
         app.handle_key(KeyCode::Backspace);
         assert_eq!(app.view, TuiView::MainMenu);
+    }
+
+    #[test]
+    fn restore_rehearsal_menu_runs_rehearsal_for_snapshot() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let source = temporary.path().join("source");
+        std::fs::create_dir(&source).expect("source should be created");
+        std::fs::write(source.join("hello.txt"), "hello").expect("source file should be written");
+        init_repository(&repository).expect("repository should initialize");
+        run_backup(BackupRequest {
+            paths: vec![source],
+            repo: repository.clone(),
+            policy_ignore_patterns: Vec::new(),
+            fail_on_changed_file: false,
+        })
+        .expect("backup should run");
+        let mut app = app_for_repository(repository).expect("app should load repository");
+
+        press_keys(
+            &mut app,
+            [
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Enter,
+                KeyCode::Enter,
+            ],
+        );
+
+        assert_eq!(app.view, TuiView::RestoreRehearsal);
+        let result = app
+            .rehearsal_result
+            .as_ref()
+            .expect("rehearsal result should be recorded");
+        assert_eq!(result.files, 1);
+        assert_eq!(result.bytes, 5);
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Restore rehearsal passed"))
+        );
     }
 
     #[test]
@@ -2736,6 +2906,7 @@ mod tests {
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Down,
+                KeyCode::Down,
                 KeyCode::Enter,
                 KeyCode::Enter,
             ],
@@ -2848,6 +3019,7 @@ mod tests {
         assert!(rendered.contains("Initialize repository"));
         assert!(rendered.contains("Create backup"));
         assert!(rendered.contains("Restore files"));
+        assert!(rendered.contains("Rehearse restore"));
         assert!(rendered.contains("Check repository health"));
         assert!(rendered.contains("Compare snapshots"));
         assert!(rendered.contains("Exit"));
