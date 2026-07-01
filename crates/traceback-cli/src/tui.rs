@@ -20,8 +20,9 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 use traceback_repo::{
-    CheckReport, FileType, RepositoryConfig, RepositoryError, SnapshotManifest, check_repository,
-    diff_snapshots, list_manifests, restore_snapshot, restore_snapshot_path, validate_repository,
+    CheckReport, FileType, InitOutcome, RepositoryConfig, RepositoryError, SnapshotManifest,
+    check_repository, diff_snapshots, init_repository, list_manifests, restore_snapshot,
+    restore_snapshot_path, validate_repository,
 };
 
 use crate::{BackupRequest, run_backup};
@@ -85,6 +86,7 @@ enum RestoreConfirmation {
 enum MenuAction {
     BrowseSnapshots,
     ChangeRepository,
+    InitializeRepository,
     CreateBackup,
     RestoreFiles,
     CheckHealth,
@@ -100,7 +102,7 @@ struct MenuItem {
     enabled: bool,
 }
 
-const MENU_ITEMS: [MenuItem; 7] = [
+const MENU_ITEMS: [MenuItem; 8] = [
     MenuItem {
         label: "Browse snapshots",
         description: "Inspect snapshots, files, metadata, and restore previews.",
@@ -111,6 +113,12 @@ const MENU_ITEMS: [MenuItem; 7] = [
         label: "Change repository",
         description: "Enter another repository path and reload snapshots.",
         action: MenuAction::ChangeRepository,
+        enabled: true,
+    },
+    MenuItem {
+        label: "Initialize repository",
+        description: "Create or load a repository at the current path.",
+        action: MenuAction::InitializeRepository,
         enabled: true,
     },
     MenuItem {
@@ -283,6 +291,36 @@ impl TuiApp {
             view: TuiView::MainMenu,
             selected_menu_item: 0,
             status_message: None,
+            path_input: None,
+            backup_source: None,
+            backup_result: None,
+            restore_target: None,
+            restore_result: None,
+            health_report: None,
+            diff_old_snapshot: 0,
+            diff_new_snapshot: 1,
+            diff_focus_old: true,
+            diff_result: None,
+            selected_snapshot: 0,
+            selected_file: 0,
+            focus: TuiFocus::Snapshots,
+            file_filter: String::new(),
+            filtering_files: false,
+            restore_plan: None,
+            restore_confirmation: RestoreConfirmation::None,
+            show_help: true,
+            should_quit: false,
+        }
+    }
+
+    pub fn uninitialized(repository: PathBuf, message: String) -> Self {
+        Self {
+            repository,
+            repository_id: "<not initialized>".to_owned(),
+            snapshots: Vec::new(),
+            view: TuiView::MainMenu,
+            selected_menu_item: 0,
+            status_message: Some(message),
             path_input: None,
             backup_source: None,
             backup_result: None,
@@ -600,6 +638,7 @@ impl TuiApp {
                     self.start_path_input(PathInputKind::BackupSource);
                 }
             }
+            MenuAction::InitializeRepository => self.initialize_repository(),
             MenuAction::CheckHealth => {
                 self.view = TuiView::HealthCheck;
                 self.run_health_check();
@@ -685,15 +724,20 @@ impl TuiApp {
 
         match kind {
             PathInputKind::Repository => {
-                let config = validate_repository(path).map_err(|error| error.to_string())?;
-                let manifests = list_manifests(path).map_err(|error| error.to_string())?;
                 self.repository = path.to_owned();
-                self.repository_id = config.repository_id;
-                self.snapshots = manifests.into_iter().map(SnapshotRow::from).collect();
-                self.selected_snapshot = 0;
-                self.selected_file = 0;
-                self.clear_restore_plan();
-                Ok(format!("Repository loaded: {}", path.display()))
+                match self.reload_repository() {
+                    Ok(()) => Ok(format!("Repository loaded: {}", path.display())),
+                    Err(error) => {
+                        self.repository_id = "<not initialized>".to_owned();
+                        self.snapshots.clear();
+                        self.selected_snapshot = 0;
+                        self.selected_file = 0;
+                        self.clear_restore_plan();
+                        Ok(format!(
+                            "Repository path selected but not loaded: {error}. Use Initialize repository."
+                        ))
+                    }
+                }
             }
             PathInputKind::BackupSource => {
                 if !path.exists() {
@@ -758,6 +802,45 @@ impl TuiApp {
                 self.status_message = Some(format!("Backup failed: {error}"));
             }
         }
+    }
+
+    fn initialize_repository(&mut self) {
+        match init_repository(&self.repository) {
+            Ok(InitOutcome::Created(config)) => {
+                self.repository_id = config.repository_id;
+                self.snapshots.clear();
+                self.selected_snapshot = 0;
+                self.selected_file = 0;
+                self.clear_restore_plan();
+                self.status_message = Some(format!(
+                    "Repository initialized at {}",
+                    self.repository.display()
+                ));
+            }
+            Ok(InitOutcome::AlreadyInitialized(_)) => match self.reload_repository() {
+                Ok(()) => {
+                    self.status_message =
+                        Some(format!("Repository loaded: {}", self.repository.display()));
+                }
+                Err(error) => {
+                    self.status_message = Some(format!("Repository load failed: {error}"));
+                }
+            },
+            Err(error) => {
+                self.status_message = Some(format!("Repository init failed: {error}"));
+            }
+        }
+    }
+
+    fn reload_repository(&mut self) -> Result<(), String> {
+        let config = validate_repository(&self.repository).map_err(|error| error.to_string())?;
+        let manifests = list_manifests(&self.repository).map_err(|error| error.to_string())?;
+        self.repository_id = config.repository_id;
+        self.snapshots = manifests.into_iter().map(SnapshotRow::from).collect();
+        self.selected_snapshot = 0;
+        self.selected_file = 0;
+        self.clear_restore_plan();
+        Ok(())
     }
 
     fn prepare_restore_plan(&mut self) {
@@ -1093,6 +1176,16 @@ pub(crate) fn app_for_repository(repository: PathBuf) -> Result<TuiApp, Reposito
     let config = validate_repository(&repository)?;
     let manifests = list_manifests(&repository).map_err(repository_error)?;
     Ok(TuiApp::new(repository, config, manifests))
+}
+
+pub(crate) fn app_for_repository_or_path(repository: PathBuf) -> TuiApp {
+    match app_for_repository(repository.clone()) {
+        Ok(app) => app,
+        Err(error) => TuiApp::uninitialized(
+            repository,
+            format!("Repository is not initialized: {error}. Use Initialize repository."),
+        ),
+    }
 }
 
 fn repository_error(error: traceback_repo::ManifestError) -> RepositoryError {
@@ -1952,7 +2045,13 @@ mod tests {
         app.handle_key(KeyCode::Backspace);
         press_keys(
             &mut app,
-            [KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter],
+            [
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Enter,
+            ],
         );
 
         assert_eq!(app.view, TuiView::Browser);
@@ -1966,6 +2065,7 @@ mod tests {
         press_keys(
             &mut app,
             [
+                KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Down,
@@ -1993,6 +2093,7 @@ mod tests {
         press_keys(
             &mut app,
             [
+                KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Down,
@@ -2064,23 +2165,42 @@ mod tests {
     }
 
     #[test]
-    fn repository_path_input_reports_validation_errors() {
+    fn repository_path_input_accepts_uninitialized_path() {
         let temporary = tempdir().expect("temporary directory should be created");
         let mut app = app_with_snapshots(1);
+        let repository = temporary.path().join("missing");
 
         press_keys(&mut app, [KeyCode::Down, KeyCode::Enter]);
-        replace_input(
-            &mut app,
-            &temporary.path().join("missing").display().to_string(),
-        );
+        replace_input(&mut app, &repository.display().to_string());
         app.handle_key(KeyCode::Enter);
 
-        assert_eq!(app.view, TuiView::PathInput);
+        assert_eq!(app.view, TuiView::MainMenu);
+        assert_eq!(app.repository, repository);
+        assert_eq!(app.repository_id, "<not initialized>");
+        assert_eq!(app.snapshot_count(), 0);
         assert!(
-            app.path_input
-                .as_ref()
-                .and_then(|input| input.error.as_deref())
-                .is_some_and(|error| error.contains("config"))
+            app.status_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Use Initialize repository"))
+        );
+    }
+
+    #[test]
+    fn initialize_repository_menu_creates_missing_repository() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("new-repo");
+        let mut app = TuiApp::uninitialized(repository.clone(), "not ready".to_owned());
+
+        press_keys(&mut app, [KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+
+        assert_eq!(app.view, TuiView::MainMenu);
+        assert!(repository.join("config.toml").exists());
+        assert_ne!(app.repository_id, "<not initialized>");
+        assert_eq!(app.snapshot_count(), 0);
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Repository initialized at"))
         );
     }
 
@@ -2092,7 +2212,10 @@ mod tests {
         let target = temporary.path().join("restore-target");
         let mut app = app_with_snapshots(1);
 
-        press_keys(&mut app, [KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+        press_keys(
+            &mut app,
+            [KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter],
+        );
         replace_input(&mut app, &source.display().to_string());
         app.handle_key(KeyCode::Enter);
 
@@ -2127,7 +2250,10 @@ mod tests {
         init_repository(&repository).expect("repository should initialize");
         let mut app = app_for_repository(repository).expect("app should load repository");
 
-        press_keys(&mut app, [KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+        press_keys(
+            &mut app,
+            [KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter],
+        );
         replace_input(&mut app, &source.display().to_string());
         app.handle_key(KeyCode::Enter);
         assert_eq!(app.view, TuiView::BackupReview);
@@ -2609,6 +2735,7 @@ mod tests {
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Down,
+                KeyCode::Down,
                 KeyCode::Enter,
                 KeyCode::Enter,
             ],
@@ -2718,6 +2845,7 @@ mod tests {
         assert!(rendered.contains("Main Menu"));
         assert!(rendered.contains("> Browse snapshots"));
         assert!(rendered.contains("Change repository"));
+        assert!(rendered.contains("Initialize repository"));
         assert!(rendered.contains("Create backup"));
         assert!(rendered.contains("Restore files"));
         assert!(rendered.contains("Check repository health"));

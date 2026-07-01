@@ -87,6 +87,9 @@ The terminal UI validates a repository and opens a guided main menu:
 traceback tui --repo ./my-backups
 ```
 
+If the repository path does not exist yet, the TUI still opens and offers an
+`Initialize repository` action from the main menu.
+
 To skip typing a long backup source path inside the terminal UI, launch it with
 the source prefilled:
 
@@ -94,9 +97,9 @@ the source prefilled:
 traceback tui --repo ./my-backups --source ./documents
 ```
 
-The main menu lets users choose guided actions such as changing the repository,
-running a backup from a selected source, browsing snapshots, restoring files,
-checking repository health, comparing snapshots, or exiting.
+The main menu lets users choose guided actions such as changing or initializing
+the repository, running a backup from a selected source, browsing snapshots,
+restoring files, checking repository health, comparing snapshots, or exiting.
 
 The snapshot browser shows three panels: snapshots, files in the selected
 snapshot, and details for the selected snapshot or file. Restore support previews

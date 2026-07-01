@@ -665,7 +665,7 @@ pub fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             if json {
                 return Err("tui does not support --json".into());
             }
-            let mut app = tui::app_for_repository(repo)?;
+            let mut app = tui::app_for_repository_or_path(repo);
             if let Some(source) = source {
                 if !source.exists() {
                     return Err(
