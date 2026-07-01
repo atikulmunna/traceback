@@ -101,7 +101,7 @@ The main menu lets users choose guided actions such as changing or initializing
 the repository, running a backup from a selected source, browsing snapshots,
 restoring files, rehearsing restores, checking repository health, reviewing the
 doctor report, comparing snapshots, explaining backups, reviewing storage blame,
-or exiting.
+recovering interrupted writes, or exiting.
 
 The snapshot browser shows three panels: snapshots, files in the selected
 snapshot, and details for the selected snapshot or file. Restore support previews
@@ -133,6 +133,10 @@ The storage blame screen runs the same accounting as `traceback blame-size` for
 a selected snapshot and shows total logical, unique, shared, and reclaimable
 stored bytes plus the top paths by stored impact.
 
+The recover interrupted writes screen scans for abandoned staging entries and
+temporary chunk files, shows the cleanup plan, and requires `y` confirmation
+before running the same cleanup as `traceback recover`.
+
 TUI keybindings:
 
 ```text
@@ -146,6 +150,9 @@ Enter           rerun the doctor report on the doctor screen
 Enter           run the selected snapshot diff on the diff screen
 Enter           explain the selected snapshot on the explain screen
 Enter           run storage blame on the storage blame screen
+Enter           scan for recoverable artifacts on the recovery screen
+y               confirm restore or reviewed maintenance cleanup
+n               cancel or clear a restore/maintenance preview
 Backspace       return from the browser to the main menu
 e               edit the backup source on the backup review screen
 /               start filtering file paths
@@ -154,8 +161,6 @@ t               optionally enter a custom restore target path from the browser
 Esc             stop filtering, cancel restore preview, or quit
 c               clear the file filter while the file panel is focused
 r               preview a restore for the focused snapshot/file
-y               run the previewed restore to the shown target
-n               cancel or clear a restore preview
 ? or F1         show or hide help
 q               quit
 ```

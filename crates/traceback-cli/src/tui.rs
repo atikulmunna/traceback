@@ -23,7 +23,8 @@ use traceback_repo::{
     CheckReport, DoctorReport, ExplainReport, FileType, FindingLevel, InitOutcome,
     RepositoryConfig, RepositoryError, SnapshotManifest, StorageBlameReport, blame_snapshot,
     check_repository, diff_snapshots, doctor_repository, explain_snapshot, init_repository,
-    list_manifests, rehearse_restore, restore_snapshot, restore_snapshot_path, validate_repository,
+    list_manifests, recover_interrupted_writes, rehearse_restore, restore_snapshot,
+    restore_snapshot_path, validate_repository,
 };
 
 use crate::{BackupRequest, run_backup};
@@ -49,6 +50,8 @@ pub struct TuiApp {
     doctor_report: Option<DoctorRunSummary>,
     explain_result: Option<ExplainRunSummary>,
     blame_result: Option<BlameRunSummary>,
+    recovery_report: Option<RecoveryRunSummary>,
+    recovery_confirmation: MaintenanceConfirmation,
     diff_old_snapshot: usize,
     diff_new_snapshot: usize,
     diff_focus_old: bool,
@@ -75,6 +78,7 @@ enum TuiView {
     DoctorReport,
     ExplainBackup,
     StorageBlame,
+    RecoverWrites,
     SnapshotDiff,
 }
 
@@ -103,6 +107,7 @@ enum MenuAction {
     DoctorReport,
     ExplainBackup,
     StorageBlame,
+    RecoverWrites,
     CompareSnapshots,
     Quit,
 }
@@ -115,7 +120,7 @@ struct MenuItem {
     enabled: bool,
 }
 
-const MENU_ITEMS: [MenuItem; 12] = [
+const MENU_ITEMS: [MenuItem; 13] = [
     MenuItem {
         label: "Browse snapshots",
         description: "Inspect snapshots, files, metadata, and restore previews.",
@@ -183,6 +188,12 @@ const MENU_ITEMS: [MenuItem; 12] = [
         enabled: true,
     },
     MenuItem {
+        label: "Recover interrupted writes",
+        description: "Review and clean abandoned staging or temporary chunk files.",
+        action: MenuAction::RecoverWrites,
+        enabled: true,
+    },
+    MenuItem {
         label: "Exit",
         description: "Close the terminal UI.",
         action: MenuAction::Quit,
@@ -195,6 +206,13 @@ enum PathInputKind {
     Repository,
     BackupSource,
     RestoreTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaintenanceConfirmation {
+    None,
+    Awaiting,
+    Completed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,6 +248,13 @@ struct HealthCheckSummary {
     staging_leftovers: usize,
     temporary_chunk_files: usize,
     issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecoveryRunSummary {
+    staging_entries: usize,
+    temporary_chunks: usize,
+    removed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -474,6 +499,8 @@ impl TuiApp {
             doctor_report: None,
             explain_result: None,
             blame_result: None,
+            recovery_report: None,
+            recovery_confirmation: MaintenanceConfirmation::None,
             diff_old_snapshot: 0,
             diff_new_snapshot: 1,
             diff_focus_old: true,
@@ -508,6 +535,8 @@ impl TuiApp {
             doctor_report: None,
             explain_result: None,
             blame_result: None,
+            recovery_report: None,
+            recovery_confirmation: MaintenanceConfirmation::None,
             diff_old_snapshot: 0,
             diff_new_snapshot: 1,
             diff_focus_old: true,
@@ -569,6 +598,11 @@ impl TuiApp {
 
         if self.view == TuiView::StorageBlame {
             self.handle_storage_blame_key(code);
+            return;
+        }
+
+        if self.view == TuiView::RecoverWrites {
+            self.handle_recover_writes_key(code);
             return;
         }
 
@@ -723,6 +757,27 @@ impl TuiApp {
         }
     }
 
+    fn handle_recover_writes_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.scan_recoverable_writes(),
+            KeyCode::Char('y') | KeyCode::Char('Y')
+                if self.recovery_confirmation == MaintenanceConfirmation::Awaiting =>
+            {
+                self.run_recover_writes();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc
+                if self.recovery_confirmation == MaintenanceConfirmation::Awaiting =>
+            {
+                self.recovery_confirmation = MaintenanceConfirmation::None;
+                self.status_message = Some("Recovery cancelled.".to_owned());
+            }
+            KeyCode::Backspace | KeyCode::Esc => self.view = TuiView::MainMenu,
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = !self.show_help,
+            _ => {}
+        }
+    }
+
     fn handle_snapshot_diff_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Enter => self.run_snapshot_diff(),
@@ -799,6 +854,15 @@ impl TuiApp {
         if self.view == TuiView::StorageBlame {
             return "Up/Down choose snapshot | Enter blame | Backspace/Esc menu | q quit"
                 .to_owned();
+        }
+
+        if self.view == TuiView::RecoverWrites {
+            return if self.recovery_confirmation == MaintenanceConfirmation::Awaiting {
+                "y recover artifacts | n/Esc cancel | Enter rescan | Backspace menu | q quit"
+                    .to_owned()
+            } else {
+                "Enter scan | y recover after review | Backspace/Esc menu | q quit".to_owned()
+            };
         }
 
         if self.view == TuiView::SnapshotDiff {
@@ -922,6 +986,7 @@ impl TuiApp {
             }
             MenuAction::ExplainBackup => self.open_explain_backup(),
             MenuAction::StorageBlame => self.open_storage_blame(),
+            MenuAction::RecoverWrites => self.open_recover_writes(),
             MenuAction::CompareSnapshots => self.open_snapshot_diff(),
             MenuAction::Quit => self.should_quit = true,
         }
@@ -1320,6 +1385,59 @@ impl TuiApp {
         }
     }
 
+    fn open_recover_writes(&mut self) {
+        self.view = TuiView::RecoverWrites;
+        self.recovery_report = None;
+        self.recovery_confirmation = MaintenanceConfirmation::None;
+        self.status_message =
+            Some("Press Enter to scan for recoverable write artifacts.".to_owned());
+    }
+
+    fn scan_recoverable_writes(&mut self) {
+        let report = check_repository(&self.repository);
+        let staging_entries = report.abandoned_staging_entries;
+        let temporary_chunks = report.temporary_chunk_files;
+        self.recovery_report = Some(RecoveryRunSummary {
+            staging_entries,
+            temporary_chunks,
+            removed: false,
+        });
+        self.recovery_confirmation = if staging_entries + temporary_chunks > 0 {
+            MaintenanceConfirmation::Awaiting
+        } else {
+            MaintenanceConfirmation::None
+        };
+        self.status_message = if self.recovery_confirmation == MaintenanceConfirmation::Awaiting {
+            Some(format!(
+                "Recovery scan found {} staging and {} temporary chunk artifact(s).",
+                staging_entries, temporary_chunks
+            ))
+        } else {
+            Some("Recovery scan found no interrupted-write artifacts.".to_owned())
+        };
+    }
+
+    fn run_recover_writes(&mut self) {
+        match recover_interrupted_writes(&self.repository) {
+            Ok(report) => {
+                self.recovery_report = Some(RecoveryRunSummary {
+                    staging_entries: report.staging_entries_removed,
+                    temporary_chunks: report.temporary_chunks_removed,
+                    removed: true,
+                });
+                self.recovery_confirmation = MaintenanceConfirmation::Completed;
+                self.status_message = Some(format!(
+                    "Recovery removed {} staging and {} temporary chunk artifact(s).",
+                    report.staging_entries_removed, report.temporary_chunks_removed
+                ));
+            }
+            Err(error) => {
+                self.recovery_confirmation = MaintenanceConfirmation::None;
+                self.status_message = Some(format!("Recovery failed: {error}"));
+            }
+        }
+    }
+
     fn run_snapshot_diff(&mut self) {
         if self.snapshots.len() < 2 {
             self.status_message = Some("Create at least two snapshots to compare.".to_owned());
@@ -1642,6 +1760,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
         | TuiView::DoctorReport
         | TuiView::ExplainBackup
         | TuiView::StorageBlame
+        | TuiView::RecoverWrites
         | TuiView::SnapshotDiff => " guided terminal",
     };
     let title = Paragraph::new(Line::from(vec![
@@ -1764,6 +1883,20 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
             .wrap(Wrap { trim: false })
             .block(accent_block("Storage Blame"));
         frame.render_widget(blame, chunks[2]);
+
+        let footer = Paragraph::new(app.help_text())
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(SOFT_TEAL))
+            .block(accent_block(""));
+        frame.render_widget(footer, chunks[3]);
+        return;
+    }
+
+    if app.view == TuiView::RecoverWrites {
+        let recovery = Paragraph::new(recover_writes_lines(app))
+            .wrap(Wrap { trim: false })
+            .block(accent_block("Recover Interrupted Writes"));
+        frame.render_widget(recovery, chunks[2]);
 
         let footer = Paragraph::new(app.help_text())
             .alignment(Alignment::Center)
@@ -2295,6 +2428,62 @@ fn storage_blame_lines(app: &TuiApp) -> Vec<Line<'static>> {
     lines
 }
 
+fn recover_writes_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Review interrupted-write artifacts before cleanup.",
+            Style::default().fg(SOFT_TEAL),
+        )),
+        Line::from(""),
+        Line::from("Press Enter to scan staging and temporary chunk files."),
+        Line::from("Recovery removes abandoned staging entries and .tmp-* chunk files only."),
+    ];
+
+    let Some(report) = &app.recovery_report else {
+        return lines;
+    };
+
+    lines.extend([
+        Line::from(""),
+        Line::from(Span::styled(
+            if report.removed {
+                "Last recovery result:"
+            } else {
+                "Recovery scan:"
+            },
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!("Staging entries: {}", report.staging_entries)),
+        Line::from(format!("Temporary chunks: {}", report.temporary_chunks)),
+    ]);
+
+    if report.removed {
+        lines.push(Line::from("Result: cleaned"));
+        lines.push(Line::from(
+            "Press Enter to rescan and verify the repository is clear.",
+        ));
+    } else if report.staging_entries + report.temporary_chunks == 0 {
+        lines.push(Line::from(Span::styled(
+            "No recoverable artifacts found.",
+            Style::default().fg(TEAL),
+        )));
+    } else {
+        lines.extend([
+            Line::from(""),
+            Line::from(Span::styled(
+                "Confirmation required:",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("Press y to run recovery, or n/Esc to cancel."),
+            Line::from("Confirm no backup or maintenance command is currently running."),
+        ]);
+    }
+
+    lines
+}
+
 fn snapshot_diff_lines(app: &TuiApp) -> Vec<Line<'static>> {
     if app.snapshots.len() < 2 {
         return vec![
@@ -2754,15 +2943,17 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use tempfile::tempdir;
     use traceback_repo::{
-        FileEntry, FileType, FindingLevel, RepositoryConfig, SnapshotManifest, init_repository,
+        FileEntry, FileType, FindingLevel, RepositoryConfig, SnapshotManifest, StoreChunkOutcome,
+        init_repository, store_chunk,
     };
 
     use crate::{BackupRequest, run_backup};
 
     use super::{
         BackupRunSummary, BlameEntrySummary, BlameRunSummary, DiffEntrySummary, DiffRunSummary,
-        ExplainRunSummary, GrowthContributorSummary, MENU_ITEMS, MenuAction, RestoreConfirmation,
-        TEAL, TuiApp, TuiFocus, TuiView, app_for_repository, render,
+        ExplainRunSummary, GrowthContributorSummary, MENU_ITEMS, MaintenanceConfirmation,
+        MenuAction, RecoveryRunSummary, RestoreConfirmation, TEAL, TuiApp, TuiFocus, TuiView,
+        app_for_repository, render,
     };
 
     #[test]
@@ -3664,6 +3855,60 @@ mod tests {
     }
 
     #[test]
+    fn recover_writes_screen_scans_and_cleans_reviewed_artifacts() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        let abandoned_staging = repository.join("staging").join("abandoned");
+        std::fs::create_dir(&abandoned_staging).expect("staging artifact should be created");
+        let shard = repository.join("chunks").join("aa");
+        std::fs::create_dir(&shard).expect("chunk shard should be created");
+        let temporary_chunk = shard.join(".tmp-abandoned");
+        std::fs::write(&temporary_chunk, "temporary").expect("temporary chunk should be written");
+        let stored = store_chunk(&repository, b"published").expect("chunk should be stored");
+        let published_hash = match stored {
+            StoreChunkOutcome::Stored(metadata) | StoreChunkOutcome::AlreadyExists(metadata) => {
+                metadata.hash
+            }
+        };
+        let published_chunk = repository
+            .join("chunks")
+            .join(&published_hash[..2])
+            .join(&published_hash);
+        let mut app = app_for_repository(repository.clone()).expect("app should load repository");
+
+        select_menu_action(&mut app, MenuAction::RecoverWrites);
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.view, TuiView::RecoverWrites);
+        assert_eq!(app.recovery_confirmation, MaintenanceConfirmation::Awaiting);
+        let scan = app
+            .recovery_report
+            .as_ref()
+            .expect("recovery scan should be recorded");
+        assert_eq!(scan.staging_entries, 1);
+        assert_eq!(scan.temporary_chunks, 1);
+        assert!(!scan.removed);
+
+        app.handle_key(KeyCode::Char('y'));
+
+        assert_eq!(
+            app.recovery_confirmation,
+            MaintenanceConfirmation::Completed
+        );
+        let result = app
+            .recovery_report
+            .as_ref()
+            .expect("recovery result should be recorded");
+        assert_eq!(result.staging_entries, 1);
+        assert_eq!(result.temporary_chunks, 1);
+        assert!(result.removed);
+        assert!(!abandoned_staging.exists());
+        assert!(!temporary_chunk.exists());
+        assert!(published_chunk.exists());
+    }
+
+    #[test]
     fn render_snapshot_diff_includes_selection_and_result() {
         let mut app = app_with_snapshots(2);
         app.view = TuiView::SnapshotDiff;
@@ -3765,6 +4010,30 @@ mod tests {
     }
 
     #[test]
+    fn render_recover_writes_includes_scan_and_confirmation() {
+        let mut app = app_with_snapshots(0);
+        app.view = TuiView::RecoverWrites;
+        app.recovery_confirmation = MaintenanceConfirmation::Awaiting;
+        app.recovery_report = Some(RecoveryRunSummary {
+            staging_entries: 2,
+            temporary_chunks: 3,
+            removed: false,
+        });
+        let backend = TestBackend::new(140, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+
+        let rendered = render_to_string(&mut terminal, &app);
+
+        assert!(rendered.contains("Recover Interrupted Writes"));
+        assert!(rendered.contains("Recovery scan:"));
+        assert!(rendered.contains("Staging entries: 2"));
+        assert!(rendered.contains("Temporary chunks: 3"));
+        assert!(rendered.contains("Confirmation required:"));
+        assert!(rendered.contains("Press y to run recovery"));
+        assert!(rendered.contains("y recover artifacts"));
+    }
+
+    #[test]
     fn app_for_repository_validates_and_loads_repository() {
         let temporary = tempdir().expect("temporary directory should be created");
         let repository = temporary.path().join("repo");
@@ -3833,6 +4102,7 @@ mod tests {
         assert!(rendered.contains("Compare snapshots"));
         assert!(rendered.contains("Explain backup"));
         assert!(rendered.contains("Storage blame"));
+        assert!(rendered.contains("Recover interrupted writes"));
         assert!(rendered.contains("Exit"));
     }
 
