@@ -100,7 +100,7 @@ traceback tui --repo ./my-backups --source ./documents
 The main menu lets users choose guided actions such as changing or initializing
 the repository, running a backup from a selected source, browsing snapshots,
 restoring files, rehearsing restores, checking repository health, reviewing the
-doctor report, comparing snapshots, or exiting.
+doctor report, comparing snapshots, explaining backups, or exiting.
 
 The snapshot browser shows three panels: snapshots, files in the selected
 snapshot, and details for the selected snapshot or file. Restore support previews
@@ -124,6 +124,10 @@ The snapshot diff screen lets users choose old and new snapshots, run the same
 comparison as `traceback diff`, and review added, removed, modified, and
 unchanged path counts with a short changed-path list.
 
+The explain backup screen runs the same analysis as `traceback explain` for a
+selected snapshot and shows change counts, logical/stored bytes, new versus
+reused chunk bytes, and the top growth contributors.
+
 TUI keybindings:
 
 ```text
@@ -135,6 +139,7 @@ Enter           run restore rehearsal on the rehearsal screen
 Enter           rerun the repository health check on the health screen
 Enter           rerun the doctor report on the doctor screen
 Enter           run the selected snapshot diff on the diff screen
+Enter           explain the selected snapshot on the explain screen
 Backspace       return from the browser to the main menu
 e               edit the backup source on the backup review screen
 /               start filtering file paths

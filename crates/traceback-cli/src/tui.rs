@@ -20,10 +20,10 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 use traceback_repo::{
-    CheckReport, DoctorReport, FileType, FindingLevel, InitOutcome, RepositoryConfig,
-    RepositoryError, SnapshotManifest, check_repository, diff_snapshots, doctor_repository,
-    init_repository, list_manifests, rehearse_restore, restore_snapshot, restore_snapshot_path,
-    validate_repository,
+    CheckReport, DoctorReport, ExplainReport, FileType, FindingLevel, InitOutcome,
+    RepositoryConfig, RepositoryError, SnapshotManifest, check_repository, diff_snapshots,
+    doctor_repository, explain_snapshot, init_repository, list_manifests, rehearse_restore,
+    restore_snapshot, restore_snapshot_path, validate_repository,
 };
 
 use crate::{BackupRequest, run_backup};
@@ -47,6 +47,7 @@ pub struct TuiApp {
     rehearsal_result: Option<RestoreRunSummary>,
     health_report: Option<HealthCheckSummary>,
     doctor_report: Option<DoctorRunSummary>,
+    explain_result: Option<ExplainRunSummary>,
     diff_old_snapshot: usize,
     diff_new_snapshot: usize,
     diff_focus_old: bool,
@@ -71,6 +72,7 @@ enum TuiView {
     RestoreRehearsal,
     HealthCheck,
     DoctorReport,
+    ExplainBackup,
     SnapshotDiff,
 }
 
@@ -97,6 +99,7 @@ enum MenuAction {
     RehearseRestore,
     CheckHealth,
     DoctorReport,
+    ExplainBackup,
     CompareSnapshots,
     Quit,
 }
@@ -109,7 +112,7 @@ struct MenuItem {
     enabled: bool,
 }
 
-const MENU_ITEMS: [MenuItem; 10] = [
+const MENU_ITEMS: [MenuItem; 11] = [
     MenuItem {
         label: "Browse snapshots",
         description: "Inspect snapshots, files, metadata, and restore previews.",
@@ -162,6 +165,12 @@ const MENU_ITEMS: [MenuItem; 10] = [
         label: "Compare snapshots",
         description: "Select two snapshots and review changed paths.",
         action: MenuAction::CompareSnapshots,
+        enabled: true,
+    },
+    MenuItem {
+        label: "Explain backup",
+        description: "Explain snapshot changes, reuse, and storage growth.",
+        action: MenuAction::ExplainBackup,
         enabled: true,
     },
     MenuItem {
@@ -245,6 +254,27 @@ struct DiffRunSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ExplainRunSummary {
+    snapshot_id: String,
+    previous_snapshot_id: Option<String>,
+    added: usize,
+    removed: usize,
+    modified: usize,
+    unchanged: usize,
+    logical_bytes: u64,
+    newly_stored_bytes: u64,
+    new_chunk_bytes: u64,
+    reused_chunk_bytes: u64,
+    growth_contributors: Vec<GrowthContributorSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GrowthContributorSummary {
+    path: String,
+    new_chunk_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DiffEntrySummary {
     path: String,
     byte_delta: i128,
@@ -301,6 +331,31 @@ impl From<traceback_repo::DiffEntry> for DiffEntrySummary {
             byte_delta: entry.byte_delta,
             type_changed: entry.type_changed,
             content_changed: entry.content_changed,
+        }
+    }
+}
+
+impl From<ExplainReport> for ExplainRunSummary {
+    fn from(report: ExplainReport) -> Self {
+        Self {
+            snapshot_id: report.snapshot_id,
+            previous_snapshot_id: report.previous_snapshot_id,
+            added: report.added,
+            removed: report.removed,
+            modified: report.modified,
+            unchanged: report.unchanged,
+            logical_bytes: report.logical_bytes,
+            newly_stored_bytes: report.newly_stored_bytes,
+            new_chunk_bytes: report.new_chunk_bytes,
+            reused_chunk_bytes: report.reused_chunk_bytes,
+            growth_contributors: report
+                .growth_contributors
+                .into_iter()
+                .map(|contributor| GrowthContributorSummary {
+                    path: contributor.path,
+                    new_chunk_bytes: contributor.new_chunk_bytes,
+                })
+                .collect(),
         }
     }
 }
@@ -362,6 +417,7 @@ impl TuiApp {
             rehearsal_result: None,
             health_report: None,
             doctor_report: None,
+            explain_result: None,
             diff_old_snapshot: 0,
             diff_new_snapshot: 1,
             diff_focus_old: true,
@@ -394,6 +450,7 @@ impl TuiApp {
             rehearsal_result: None,
             health_report: None,
             doctor_report: None,
+            explain_result: None,
             diff_old_snapshot: 0,
             diff_new_snapshot: 1,
             diff_focus_old: true,
@@ -445,6 +502,11 @@ impl TuiApp {
 
         if self.view == TuiView::DoctorReport {
             self.handle_doctor_report_key(code);
+            return;
+        }
+
+        if self.view == TuiView::ExplainBackup {
+            self.handle_explain_backup_key(code);
             return;
         }
 
@@ -571,6 +633,20 @@ impl TuiApp {
         }
     }
 
+    fn handle_explain_backup_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.run_explain_backup(),
+            KeyCode::Down | KeyCode::Char('j') => self.select_next_snapshot(),
+            KeyCode::Up | KeyCode::Char('k') => self.select_previous_snapshot(),
+            KeyCode::Home => self.select_first_snapshot(),
+            KeyCode::End => self.select_last_snapshot(),
+            KeyCode::Backspace | KeyCode::Esc => self.view = TuiView::MainMenu,
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = !self.show_help,
+            _ => {}
+        }
+    }
+
     fn handle_snapshot_diff_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Enter => self.run_snapshot_diff(),
@@ -637,6 +713,11 @@ impl TuiApp {
 
         if self.view == TuiView::DoctorReport {
             return "Enter rerun doctor | Backspace/Esc menu | q quit".to_owned();
+        }
+
+        if self.view == TuiView::ExplainBackup {
+            return "Up/Down choose snapshot | Enter explain | Backspace/Esc menu | q quit"
+                .to_owned();
         }
 
         if self.view == TuiView::SnapshotDiff {
@@ -758,6 +839,7 @@ impl TuiApp {
                 self.view = TuiView::DoctorReport;
                 self.run_doctor_report();
             }
+            MenuAction::ExplainBackup => self.open_explain_backup(),
             MenuAction::CompareSnapshots => self.open_snapshot_diff(),
             MenuAction::Quit => self.should_quit = true,
         }
@@ -1092,6 +1174,38 @@ impl TuiApp {
         }
     }
 
+    fn open_explain_backup(&mut self) {
+        self.view = TuiView::ExplainBackup;
+        self.explain_result = None;
+        self.status_message = if self.snapshots.is_empty() {
+            Some("Create a snapshot before explaining backup growth.".to_owned())
+        } else {
+            Some("Choose a snapshot, then press Enter to explain it.".to_owned())
+        };
+    }
+
+    fn run_explain_backup(&mut self) {
+        let Some(snapshot_id) = self.selected_snapshot_id().map(ToOwned::to_owned) else {
+            self.status_message =
+                Some("Create a snapshot before explaining backup growth.".to_owned());
+            return;
+        };
+
+        match explain_snapshot(&self.repository, &snapshot_id) {
+            Ok(report) => {
+                let changed = report.added + report.removed + report.modified;
+                self.explain_result = Some(ExplainRunSummary::from(report));
+                self.status_message = Some(format!(
+                    "Backup explanation completed for {snapshot_id}: {changed} changed path(s)."
+                ));
+            }
+            Err(error) => {
+                self.explain_result = None;
+                self.status_message = Some(format!("Backup explanation failed: {error}"));
+            }
+        }
+    }
+
     fn run_snapshot_diff(&mut self) {
         if self.snapshots.len() < 2 {
             self.status_message = Some("Create at least two snapshots to compare.".to_owned());
@@ -1412,6 +1526,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
         | TuiView::RestoreRehearsal
         | TuiView::HealthCheck
         | TuiView::DoctorReport
+        | TuiView::ExplainBackup
         | TuiView::SnapshotDiff => " guided terminal",
     };
     let title = Paragraph::new(Line::from(vec![
@@ -1506,6 +1621,20 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
             .wrap(Wrap { trim: false })
             .block(accent_block("Doctor Report"));
         frame.render_widget(doctor, chunks[2]);
+
+        let footer = Paragraph::new(app.help_text())
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(SOFT_TEAL))
+            .block(accent_block(""));
+        frame.render_widget(footer, chunks[3]);
+        return;
+    }
+
+    if app.view == TuiView::ExplainBackup {
+        let explain = Paragraph::new(explain_backup_lines(app))
+            .wrap(Wrap { trim: false })
+            .block(accent_block("Explain Backup"));
+        frame.render_widget(explain, chunks[2]);
 
         let footer = Paragraph::new(app.help_text())
             .alignment(Alignment::Center)
@@ -1902,6 +2031,78 @@ fn doctor_report_lines(app: &TuiApp) -> Vec<Line<'static>> {
             "... {} more finding(s)",
             report.findings.len() - 8
         )));
+    }
+
+    lines
+}
+
+fn explain_backup_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    if app.snapshots.is_empty() {
+        return vec![
+            Line::from("Backup explanation needs at least one snapshot."),
+            Line::from("Create a backup, then return here."),
+        ];
+    }
+
+    let selected = app.selected_snapshot_id().unwrap_or("<none>");
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Explain what changed and why storage grew.",
+            Style::default().fg(SOFT_TEAL),
+        )),
+        Line::from(""),
+        Line::from(format!("Selected snapshot: {selected}")),
+        Line::from("Press Enter to explain this snapshot."),
+        Line::from(""),
+        Line::from("Snapshots:"),
+    ];
+    lines.extend(snapshot_lines(app).into_iter().take(6));
+
+    if let Some(result) = &app.explain_result {
+        lines.extend([
+            Line::from(""),
+            Line::from(Span::styled(
+                "Explanation:",
+                Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!("Snapshot: {}", result.snapshot_id)),
+            Line::from(format!(
+                "Previous: {}",
+                result.previous_snapshot_id.as_deref().unwrap_or("<none>")
+            )),
+            Line::from(format!("Added: {}", result.added)),
+            Line::from(format!("Removed: {}", result.removed)),
+            Line::from(format!("Modified: {}", result.modified)),
+            Line::from(format!("Unchanged: {}", result.unchanged)),
+            Line::from(format!("Logical bytes: {} B", result.logical_bytes)),
+            Line::from(format!(
+                "Newly stored bytes: {} B",
+                result.newly_stored_bytes
+            )),
+            Line::from(format!("New chunk bytes: {} B", result.new_chunk_bytes)),
+            Line::from(format!(
+                "Reused chunk bytes: {} B",
+                result.reused_chunk_bytes
+            )),
+            Line::from(""),
+            Line::from("Top growth contributors:"),
+        ]);
+        if result.growth_contributors.is_empty() {
+            lines.push(Line::from("No new chunk contributors."));
+        } else {
+            lines.extend(
+                result
+                    .growth_contributors
+                    .iter()
+                    .take(8)
+                    .map(|contributor| {
+                        Line::from(format!(
+                            "- {:>8} B  {}",
+                            contributor.new_chunk_bytes, contributor.path
+                        ))
+                    }),
+            );
+        }
     }
 
     lines
@@ -2360,8 +2561,9 @@ mod tests {
     use crate::{BackupRequest, run_backup};
 
     use super::{
-        BackupRunSummary, DiffEntrySummary, DiffRunSummary, MENU_ITEMS, MenuAction,
-        RestoreConfirmation, TEAL, TuiApp, TuiFocus, TuiView, app_for_repository, render,
+        BackupRunSummary, DiffEntrySummary, DiffRunSummary, ExplainRunSummary,
+        GrowthContributorSummary, MENU_ITEMS, MenuAction, RestoreConfirmation, TEAL, TuiApp,
+        TuiFocus, TuiView, app_for_repository, render,
     };
 
     #[test]
@@ -3178,6 +3380,51 @@ mod tests {
     }
 
     #[test]
+    fn explain_backup_screen_runs_for_selected_snapshot() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        let source = temporary.path().join("source");
+        std::fs::create_dir(&source).expect("source should be created");
+        std::fs::write(source.join("hello.txt"), "hello").expect("source file should be written");
+        init_repository(&repository).expect("repository should initialize");
+        run_backup(BackupRequest {
+            paths: vec![source.clone()],
+            repo: repository.clone(),
+            policy_ignore_patterns: Vec::new(),
+            fail_on_changed_file: false,
+        })
+        .expect("first backup should run");
+        std::fs::write(source.join("hello.txt"), "hello world")
+            .expect("source file should be changed");
+        run_backup(BackupRequest {
+            paths: vec![source],
+            repo: repository.clone(),
+            policy_ignore_patterns: Vec::new(),
+            fail_on_changed_file: false,
+        })
+        .expect("second backup should run");
+        let mut app = app_for_repository(repository).expect("app should load repository");
+
+        select_menu_action(&mut app, MenuAction::ExplainBackup);
+        app.handle_key(KeyCode::End);
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.view, TuiView::ExplainBackup);
+        let result = app
+            .explain_result
+            .as_ref()
+            .expect("explain result should be recorded");
+        assert_eq!(result.modified, 1);
+        assert_eq!(result.added, 0);
+        assert_eq!(result.growth_contributors[0].path, "source/hello.txt");
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|status| status.starts_with("Backup explanation completed for "))
+        );
+    }
+
+    #[test]
     fn render_snapshot_diff_includes_selection_and_result() {
         let mut app = app_with_snapshots(2);
         app.view = TuiView::SnapshotDiff;
@@ -3206,6 +3453,41 @@ mod tests {
         assert!(rendered.contains("Modified: 1"));
         assert!(rendered.contains("source/file-a.txt"));
         assert!(rendered.contains("content"));
+    }
+
+    #[test]
+    fn render_explain_backup_includes_storage_growth_details() {
+        let mut app = app_with_snapshots(2);
+        app.view = TuiView::ExplainBackup;
+        app.explain_result = Some(ExplainRunSummary {
+            snapshot_id: "snap_002".to_owned(),
+            previous_snapshot_id: Some("snap_001".to_owned()),
+            added: 1,
+            removed: 0,
+            modified: 1,
+            unchanged: 3,
+            logical_bytes: 42,
+            newly_stored_bytes: 12,
+            new_chunk_bytes: 12,
+            reused_chunk_bytes: 30,
+            growth_contributors: vec![GrowthContributorSummary {
+                path: "source/file-a.txt".to_owned(),
+                new_chunk_bytes: 12,
+            }],
+        });
+        let backend = TestBackend::new(150, 36);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+
+        let rendered = render_to_string(&mut terminal, &app);
+
+        assert!(rendered.contains("Explain Backup"));
+        assert!(rendered.contains("Selected snapshot: snap_001"));
+        assert!(rendered.contains("Explanation:"));
+        assert!(rendered.contains("Previous: snap_001"));
+        assert!(rendered.contains("New chunk bytes: 12 B"));
+        assert!(rendered.contains("Top growth contributors:"));
+        assert!(rendered.contains("source/file-a.txt"));
+        assert!(rendered.contains("Enter explain"));
     }
 
     #[test]
@@ -3275,6 +3557,7 @@ mod tests {
         assert!(rendered.contains("Check repository health"));
         assert!(rendered.contains("Doctor report"));
         assert!(rendered.contains("Compare snapshots"));
+        assert!(rendered.contains("Explain backup"));
         assert!(rendered.contains("Exit"));
     }
 
