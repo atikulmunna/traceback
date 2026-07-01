@@ -20,11 +20,11 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 use traceback_repo::{
-    CheckReport, DoctorReport, ExplainReport, FileType, FindingLevel, InitOutcome,
+    CheckReport, DoctorReport, ExplainReport, FileType, FindingLevel, GcReport, InitOutcome,
     RepositoryConfig, RepositoryError, SnapshotManifest, StorageBlameReport, blame_snapshot,
-    check_repository, diff_snapshots, doctor_repository, explain_snapshot, init_repository,
-    list_manifests, recover_interrupted_writes, rehearse_restore, restore_snapshot,
-    restore_snapshot_path, validate_repository,
+    check_repository, diff_snapshots, doctor_repository, explain_snapshot, gc_collect, gc_dry_run,
+    init_repository, list_manifests, recover_interrupted_writes, rehearse_restore,
+    restore_snapshot, restore_snapshot_path, validate_repository,
 };
 
 use crate::{BackupRequest, run_backup};
@@ -52,6 +52,8 @@ pub struct TuiApp {
     blame_result: Option<BlameRunSummary>,
     recovery_report: Option<RecoveryRunSummary>,
     recovery_confirmation: MaintenanceConfirmation,
+    gc_report: Option<GcRunSummary>,
+    gc_confirmation: MaintenanceConfirmation,
     diff_old_snapshot: usize,
     diff_new_snapshot: usize,
     diff_focus_old: bool,
@@ -79,6 +81,7 @@ enum TuiView {
     ExplainBackup,
     StorageBlame,
     RecoverWrites,
+    GarbageCollection,
     SnapshotDiff,
 }
 
@@ -108,6 +111,7 @@ enum MenuAction {
     ExplainBackup,
     StorageBlame,
     RecoverWrites,
+    GarbageCollection,
     CompareSnapshots,
     Quit,
 }
@@ -120,7 +124,7 @@ struct MenuItem {
     enabled: bool,
 }
 
-const MENU_ITEMS: [MenuItem; 13] = [
+const MENU_ITEMS: [MenuItem; 14] = [
     MenuItem {
         label: "Browse snapshots",
         description: "Inspect snapshots, files, metadata, and restore previews.",
@@ -194,6 +198,12 @@ const MENU_ITEMS: [MenuItem; 13] = [
         enabled: true,
     },
     MenuItem {
+        label: "Garbage collection",
+        description: "Dry-run orphaned chunk cleanup, then confirm deletion.",
+        action: MenuAction::GarbageCollection,
+        enabled: true,
+    },
+    MenuItem {
         label: "Exit",
         description: "Close the terminal UI.",
         action: MenuAction::Quit,
@@ -255,6 +265,19 @@ struct RecoveryRunSummary {
     staging_entries: usize,
     temporary_chunks: usize,
     removed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GcRunSummary {
+    dry_run: bool,
+    orphaned_chunks: Vec<GcChunkSummary>,
+    reclaimable_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GcChunkSummary {
+    hash: String,
+    bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -351,6 +374,23 @@ impl From<CheckReport> for HealthCheckSummary {
                 .into_iter()
                 .map(|issue| issue.to_string())
                 .collect(),
+        }
+    }
+}
+
+impl From<GcReport> for GcRunSummary {
+    fn from(report: GcReport) -> Self {
+        Self {
+            dry_run: report.dry_run,
+            orphaned_chunks: report
+                .orphaned_chunks
+                .into_iter()
+                .map(|chunk| GcChunkSummary {
+                    hash: chunk.hash,
+                    bytes: chunk.bytes,
+                })
+                .collect(),
+            reclaimable_bytes: report.reclaimable_bytes,
         }
     }
 }
@@ -501,6 +541,8 @@ impl TuiApp {
             blame_result: None,
             recovery_report: None,
             recovery_confirmation: MaintenanceConfirmation::None,
+            gc_report: None,
+            gc_confirmation: MaintenanceConfirmation::None,
             diff_old_snapshot: 0,
             diff_new_snapshot: 1,
             diff_focus_old: true,
@@ -537,6 +579,8 @@ impl TuiApp {
             blame_result: None,
             recovery_report: None,
             recovery_confirmation: MaintenanceConfirmation::None,
+            gc_report: None,
+            gc_confirmation: MaintenanceConfirmation::None,
             diff_old_snapshot: 0,
             diff_new_snapshot: 1,
             diff_focus_old: true,
@@ -603,6 +647,11 @@ impl TuiApp {
 
         if self.view == TuiView::RecoverWrites {
             self.handle_recover_writes_key(code);
+            return;
+        }
+
+        if self.view == TuiView::GarbageCollection {
+            self.handle_garbage_collection_key(code);
             return;
         }
 
@@ -778,6 +827,27 @@ impl TuiApp {
         }
     }
 
+    fn handle_garbage_collection_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.run_gc_dry_run(),
+            KeyCode::Char('y') | KeyCode::Char('Y')
+                if self.gc_confirmation == MaintenanceConfirmation::Awaiting =>
+            {
+                self.run_gc_collect();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc
+                if self.gc_confirmation == MaintenanceConfirmation::Awaiting =>
+            {
+                self.gc_confirmation = MaintenanceConfirmation::None;
+                self.status_message = Some("Garbage collection cancelled.".to_owned());
+            }
+            KeyCode::Backspace | KeyCode::Esc => self.view = TuiView::MainMenu,
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('?') | KeyCode::F(1) => self.show_help = !self.show_help,
+            _ => {}
+        }
+    }
+
     fn handle_snapshot_diff_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Enter => self.run_snapshot_diff(),
@@ -862,6 +932,15 @@ impl TuiApp {
                     .to_owned()
             } else {
                 "Enter scan | y recover after review | Backspace/Esc menu | q quit".to_owned()
+            };
+        }
+
+        if self.view == TuiView::GarbageCollection {
+            return if self.gc_confirmation == MaintenanceConfirmation::Awaiting {
+                "y delete orphaned chunks | n/Esc cancel | Enter dry-run | Backspace menu | q quit"
+                    .to_owned()
+            } else {
+                "Enter dry-run | y collect after review | Backspace/Esc menu | q quit".to_owned()
             };
         }
 
@@ -987,6 +1066,7 @@ impl TuiApp {
             MenuAction::ExplainBackup => self.open_explain_backup(),
             MenuAction::StorageBlame => self.open_storage_blame(),
             MenuAction::RecoverWrites => self.open_recover_writes(),
+            MenuAction::GarbageCollection => self.open_garbage_collection(),
             MenuAction::CompareSnapshots => self.open_snapshot_diff(),
             MenuAction::Quit => self.should_quit = true,
         }
@@ -1438,6 +1518,58 @@ impl TuiApp {
         }
     }
 
+    fn open_garbage_collection(&mut self) {
+        self.view = TuiView::GarbageCollection;
+        self.gc_report = None;
+        self.gc_confirmation = MaintenanceConfirmation::None;
+        self.status_message = Some("Press Enter to dry-run garbage collection.".to_owned());
+    }
+
+    fn run_gc_dry_run(&mut self) {
+        match gc_dry_run(&self.repository) {
+            Ok(report) => {
+                let orphaned = report.orphaned_chunks.len();
+                let reclaimable = report.reclaimable_bytes;
+                self.gc_report = Some(GcRunSummary::from(report));
+                self.gc_confirmation = if orphaned > 0 {
+                    MaintenanceConfirmation::Awaiting
+                } else {
+                    MaintenanceConfirmation::None
+                };
+                self.status_message = if orphaned > 0 {
+                    Some(format!(
+                        "GC dry-run found {orphaned} orphaned chunk(s), {reclaimable} B reclaimable."
+                    ))
+                } else {
+                    Some("GC dry-run found no orphaned chunks.".to_owned())
+                };
+            }
+            Err(error) => {
+                self.gc_report = None;
+                self.gc_confirmation = MaintenanceConfirmation::None;
+                self.status_message = Some(format!("GC dry-run failed: {error}"));
+            }
+        }
+    }
+
+    fn run_gc_collect(&mut self) {
+        match gc_collect(&self.repository) {
+            Ok(report) => {
+                let orphaned = report.orphaned_chunks.len();
+                let reclaimable = report.reclaimable_bytes;
+                self.gc_report = Some(GcRunSummary::from(report));
+                self.gc_confirmation = MaintenanceConfirmation::Completed;
+                self.status_message = Some(format!(
+                    "Garbage collection removed {orphaned} orphaned chunk(s), {reclaimable} B reclaimed."
+                ));
+            }
+            Err(error) => {
+                self.gc_confirmation = MaintenanceConfirmation::None;
+                self.status_message = Some(format!("Garbage collection failed: {error}"));
+            }
+        }
+    }
+
     fn run_snapshot_diff(&mut self) {
         if self.snapshots.len() < 2 {
             self.status_message = Some("Create at least two snapshots to compare.".to_owned());
@@ -1761,6 +1893,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
         | TuiView::ExplainBackup
         | TuiView::StorageBlame
         | TuiView::RecoverWrites
+        | TuiView::GarbageCollection
         | TuiView::SnapshotDiff => " guided terminal",
     };
     let title = Paragraph::new(Line::from(vec![
@@ -1897,6 +2030,20 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp) {
             .wrap(Wrap { trim: false })
             .block(accent_block("Recover Interrupted Writes"));
         frame.render_widget(recovery, chunks[2]);
+
+        let footer = Paragraph::new(app.help_text())
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(SOFT_TEAL))
+            .block(accent_block(""));
+        frame.render_widget(footer, chunks[3]);
+        return;
+    }
+
+    if app.view == TuiView::GarbageCollection {
+        let gc = Paragraph::new(garbage_collection_lines(app))
+            .wrap(Wrap { trim: false })
+            .block(accent_block("Garbage Collection"));
+        frame.render_widget(gc, chunks[2]);
 
         let footer = Paragraph::new(app.help_text())
             .alignment(Alignment::Center)
@@ -2484,6 +2631,75 @@ fn recover_writes_lines(app: &TuiApp) -> Vec<Line<'static>> {
     lines
 }
 
+fn garbage_collection_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Review orphaned chunks before deleting repository data.",
+            Style::default().fg(SOFT_TEAL),
+        )),
+        Line::from(""),
+        Line::from("Press Enter to run a dry-run garbage collection plan."),
+        Line::from("GC only removes chunks that are not referenced by published snapshots."),
+    ];
+
+    let Some(report) = &app.gc_report else {
+        return lines;
+    };
+
+    lines.extend([
+        Line::from(""),
+        Line::from(Span::styled(
+            if report.dry_run {
+                "Garbage collection dry-run:"
+            } else {
+                "Garbage collection result:"
+            },
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!("Orphaned chunks: {}", report.orphaned_chunks.len())),
+        Line::from(format!("Reclaimable bytes: {} B", report.reclaimable_bytes)),
+    ]);
+
+    if report.orphaned_chunks.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No orphaned chunks found.",
+            Style::default().fg(TEAL),
+        )));
+        return lines;
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from("Chunks:"));
+    lines.extend(report.orphaned_chunks.iter().take(8).map(|chunk| {
+        Line::from(format!(
+            "- {}  {} B",
+            abbreviate(&chunk.hash, 16),
+            chunk.bytes
+        ))
+    }));
+    if report.orphaned_chunks.len() > 8 {
+        lines.push(Line::from(format!(
+            "... {} more chunk(s)",
+            report.orphaned_chunks.len() - 8
+        )));
+    }
+
+    if report.dry_run {
+        lines.extend([
+            Line::from(""),
+            Line::from(Span::styled(
+                "Confirmation required:",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("Press y to delete these orphaned chunk files, or n/Esc to cancel."),
+        ]);
+    }
+
+    lines
+}
+
 fn snapshot_diff_lines(app: &TuiApp) -> Vec<Line<'static>> {
     if app.snapshots.len() < 2 {
         return vec![
@@ -2951,9 +3167,9 @@ mod tests {
 
     use super::{
         BackupRunSummary, BlameEntrySummary, BlameRunSummary, DiffEntrySummary, DiffRunSummary,
-        ExplainRunSummary, GrowthContributorSummary, MENU_ITEMS, MaintenanceConfirmation,
-        MenuAction, RecoveryRunSummary, RestoreConfirmation, TEAL, TuiApp, TuiFocus, TuiView,
-        app_for_repository, render,
+        ExplainRunSummary, GcChunkSummary, GcRunSummary, GrowthContributorSummary, MENU_ITEMS,
+        MaintenanceConfirmation, MenuAction, RecoveryRunSummary, RestoreConfirmation, TEAL, TuiApp,
+        TuiFocus, TuiView, app_for_repository, render,
     };
 
     #[test]
@@ -3909,6 +4125,46 @@ mod tests {
     }
 
     #[test]
+    fn garbage_collection_screen_dry_runs_then_collects_orphans() {
+        let temporary = tempdir().expect("temporary directory should be created");
+        let repository = temporary.path().join("repo");
+        init_repository(&repository).expect("repository should initialize");
+        let stored = store_chunk(&repository, b"orphaned").expect("chunk should be stored");
+        let hash = match stored {
+            StoreChunkOutcome::Stored(metadata) | StoreChunkOutcome::AlreadyExists(metadata) => {
+                metadata.hash
+            }
+        };
+        let chunk = repository.join("chunks").join(&hash[..2]).join(&hash);
+        let mut app = app_for_repository(repository).expect("app should load repository");
+
+        select_menu_action(&mut app, MenuAction::GarbageCollection);
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.view, TuiView::GarbageCollection);
+        assert_eq!(app.gc_confirmation, MaintenanceConfirmation::Awaiting);
+        let dry_run = app
+            .gc_report
+            .as_ref()
+            .expect("gc dry-run should be recorded");
+        assert!(dry_run.dry_run);
+        assert_eq!(dry_run.orphaned_chunks.len(), 1);
+        assert_eq!(dry_run.orphaned_chunks[0].hash, hash);
+        assert!(chunk.exists());
+
+        app.handle_key(KeyCode::Char('y'));
+
+        assert_eq!(app.gc_confirmation, MaintenanceConfirmation::Completed);
+        let collected = app
+            .gc_report
+            .as_ref()
+            .expect("gc result should be recorded");
+        assert!(!collected.dry_run);
+        assert_eq!(collected.orphaned_chunks.len(), 1);
+        assert!(!chunk.exists());
+    }
+
+    #[test]
     fn render_snapshot_diff_includes_selection_and_result() {
         let mut app = app_with_snapshots(2);
         app.view = TuiView::SnapshotDiff;
@@ -4034,6 +4290,33 @@ mod tests {
     }
 
     #[test]
+    fn render_garbage_collection_includes_dry_run_and_confirmation() {
+        let mut app = app_with_snapshots(0);
+        app.view = TuiView::GarbageCollection;
+        app.gc_confirmation = MaintenanceConfirmation::Awaiting;
+        app.gc_report = Some(GcRunSummary {
+            dry_run: true,
+            orphaned_chunks: vec![GcChunkSummary {
+                hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                bytes: 14,
+            }],
+            reclaimable_bytes: 14,
+        });
+        let backend = TestBackend::new(150, 32);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+
+        let rendered = render_to_string(&mut terminal, &app);
+
+        assert!(rendered.contains("Garbage Collection"));
+        assert!(rendered.contains("Garbage collection dry-run:"));
+        assert!(rendered.contains("Orphaned chunks: 1"));
+        assert!(rendered.contains("Reclaimable bytes: 14 B"));
+        assert!(rendered.contains("aaaaaaaaaaaaaaaa..."));
+        assert!(rendered.contains("Confirmation required:"));
+        assert!(rendered.contains("y delete orphaned chunks"));
+    }
+
+    #[test]
     fn app_for_repository_validates_and_loads_repository() {
         let temporary = tempdir().expect("temporary directory should be created");
         let repository = temporary.path().join("repo");
@@ -4103,6 +4386,7 @@ mod tests {
         assert!(rendered.contains("Explain backup"));
         assert!(rendered.contains("Storage blame"));
         assert!(rendered.contains("Recover interrupted writes"));
+        assert!(rendered.contains("Garbage collection"));
         assert!(rendered.contains("Exit"));
     }
 

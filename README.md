@@ -101,7 +101,7 @@ The main menu lets users choose guided actions such as changing or initializing
 the repository, running a backup from a selected source, browsing snapshots,
 restoring files, rehearsing restores, checking repository health, reviewing the
 doctor report, comparing snapshots, explaining backups, reviewing storage blame,
-recovering interrupted writes, or exiting.
+recovering interrupted writes, running reviewed garbage collection, or exiting.
 
 The snapshot browser shows three panels: snapshots, files in the selected
 snapshot, and details for the selected snapshot or file. Restore support previews
@@ -137,6 +137,10 @@ The recover interrupted writes screen scans for abandoned staging entries and
 temporary chunk files, shows the cleanup plan, and requires `y` confirmation
 before running the same cleanup as `traceback recover`.
 
+The garbage collection screen runs a dry-run plan first, lists orphaned chunks
+and reclaimable bytes, and requires `y` confirmation before deleting the same
+orphaned chunks as `traceback gc --yes`.
+
 TUI keybindings:
 
 ```text
@@ -151,6 +155,7 @@ Enter           run the selected snapshot diff on the diff screen
 Enter           explain the selected snapshot on the explain screen
 Enter           run storage blame on the storage blame screen
 Enter           scan for recoverable artifacts on the recovery screen
+Enter           dry-run garbage collection on the GC screen
 y               confirm restore or reviewed maintenance cleanup
 n               cancel or clear a restore/maintenance preview
 Backspace       return from the browser to the main menu
